@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ALife - 人工生命演化模拟器</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    }
+
+    #canvas-container {
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    #ui-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    #stats-panel {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: rgba(0, 0, 0, 0.75);
+      color: #e0e0e0;
+      padding: 16px 20px;
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.8;
+      min-width: 220px;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      pointer-events: auto;
+      transition: min-width 0.3s ease;
+    }
+
+    #stats-panel h3 {
+      color: #4fc3f7;
+      margin-bottom: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+
+    #stats-panel .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 2px 0;
+    }
+
+    #stats-panel .stat-label {
+      color: #aaa;
+    }
+
+    #stats-panel .stat-value {
+      color: #fff;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #controls-panel {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: rgba(0, 0, 0, 0.75);
+      color: #e0e0e0;
+      padding: 16px 20px;
+      border-radius: 12px;
+      font-size: 13px;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      pointer-events: auto;
+    }
+
+    #controls-panel button {
+      background: rgba(79, 195, 247, 0.2);
+      color: #4fc3f7;
+      border: 1px solid rgba(79, 195, 247, 0.4);
+      padding: 6px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      margin: 4px;
+      transition: all 0.2s;
+    }
+
+    #controls-panel button:hover {
+      background: rgba(79, 195, 247, 0.4);
+    }
+
+    #controls-panel button.active {
+      background: rgba(79, 195, 247, 0.5);
+      border-color: #4fc3f7;
+    }
+
+    .species-list {
+      margin-top: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .species-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 3px 0;
+    }
+
+    .species-color {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* ---- 生命体详情面板 ---- */
+    #organism-panel {
+      position: absolute;
+      bottom: 16px;
+      right: 16px;
+      background: rgba(0, 0, 0, 0.85);
+      color: #e0e0e0;
+      padding: 16px 20px;
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.7;
+      min-width: 260px;
+      max-width: 320px;
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(0, 255, 255, 0.25);
+      pointer-events: auto;
+      display: none;
+      box-shadow: 0 4px 20px rgba(0, 255, 255, 0.1);
+    }
+
+    #organism-panel.visible {
+      display: block;
+      animation: panelFadeIn 0.25s ease-out;
+    }
+
+    @keyframes panelFadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    #organism-panel .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    #organism-panel .panel-header h4 {
+      color: #00e5ff;
+      font-size: 14px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    #organism-panel .panel-close {
+      cursor: pointer;
+      color: #888;
+      font-size: 16px;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: all 0.15s;
+    }
+
+    #organism-panel .panel-close:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    #organism-panel .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 1px 0;
+    }
+
+    #organism-panel .info-label {
+      color: #999;
+      font-size: 12px;
+    }
+
+    #organism-panel .info-value {
+      color: #fff;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      font-size: 12px;
+    }
+
+    #organism-panel .dna-section {
+      margin-top: 8px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    #organism-panel .dna-section h5 {
+      color: #00e5ff;
+      font-size: 12px;
+      font-weight: 500;
+      margin: 0 0 4px 0;
+    }
+
+    #organism-panel .dna-bar-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 0;
+      font-size: 11px;
+    }
+
+    #organism-panel .dna-bar-label {
+      color: #aaa;
+      width: 65px;
+      flex-shrink: 0;
+      text-align: right;
+    }
+
+    #organism-panel .dna-bar-track {
+      flex: 1;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    #organism-panel .dna-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+
+    #organism-panel .dna-bar-value {
+      color: #ccc;
+      width: 40px;
+      flex-shrink: 0;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ---- 启动画面 ---- */
+    #start-screen {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: radial-gradient(ellipse at 50% 40%, rgba(0,30,60,0.80) 0%, rgba(0,0,0,0.95) 100%);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      transition: opacity 0.5s ease;
+    }
+
+    #start-screen.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .start-content {
+      text-align: center;
+      color: #e0e0e0;
+    }
+
+    .start-logo {
+      font-size: 72px;
+      margin-bottom: 8px;
+      animation: logoFloat 3s ease-in-out infinite;
+    }
+
+    @keyframes logoFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
+    }
+
+    .start-title {
+      font-size: 48px;
+      font-weight: 700;
+      color: #4fc3f7;
+      letter-spacing: 8px;
+      margin-bottom: 8px;
+    }
+
+    .start-subtitle {
+      font-size: 18px;
+      color: #90a4ae;
+      margin-bottom: 12px;
+    }
+
+    .start-desc {
+      font-size: 14px;
+      color: #607d8b;
+      margin-bottom: 40px;
+      max-width: 400px;
+      margin-left: auto;
+      margin-right: auto;
+      line-height: 1.6;
+    }
+
+    .start-buttons {
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .start-btn {
+      padding: 14px 36px;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all 0.25s;
+      letter-spacing: 1px;
+    }
+
+    .start-btn.primary {
+      background: linear-gradient(135deg, #4fc3f7, #0288d1);
+      color: #fff;
+      box-shadow: 0 4px 20px rgba(79,195,247,0.3);
+    }
+
+    .start-btn.primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 28px rgba(79,195,247,0.5);
+    }
+
+    .start-btn.secondary {
+      background: rgba(255,255,255,0.08);
+      color: #90a4ae;
+      border: 1px solid rgba(255,255,255,0.15);
+    }
+
+    .start-btn.secondary:hover {
+      background: rgba(255,255,255,0.15);
+      color: #fff;
+    }
+
+    /* ---- 设置弹窗 ---- */
+    #settings-modal {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.6);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+    }
+
+    .settings-card {
+      background: rgba(15,20,35,0.96);
+      border: 1px solid rgba(79,195,247,0.2);
+      border-radius: 16px;
+      padding: 28px 32px;
+      width: 480px;
+      max-width: 90vw;
+      max-height: 80vh;
+      overflow-y: auto;
+      color: #e0e0e0;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+    }
+
+    .settings-card::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .settings-card::-webkit-scrollbar-thumb {
+      background: rgba(79,195,247,0.3);
+      border-radius: 2px;
+    }
+
+    .settings-card h2 {
+      color: #4fc3f7;
+      font-size: 18px;
+      margin-bottom: 20px;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .settings-section {
+      margin-bottom: 16px;
+    }
+
+    .settings-section h3 {
+      color: #78909c;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 10px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .setting-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 5px 0;
+    }
+
+    .setting-row label {
+      color: #b0bec5;
+      font-size: 13px;
+    }
+
+    .setting-row input[type="number"] {
+      width: 88px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.05);
+      color: #fff;
+      font-size: 13px;
+      text-align: right;
+      outline: none;
+      font-variant-numeric: tabular-nums;
+      transition: border-color 0.2s;
+    }
+
+    .setting-row input[type="number"]:focus {
+      border-color: rgba(79,195,247,0.5);
+      background: rgba(79,195,247,0.06);
+    }
+
+    .settings-footer {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+      margin-top: 20px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .settings-footer button {
+      padding: 8px 24px;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s;
+    }
+
+    #btn-settings-ok {
+      background: rgba(79,195,247,0.2);
+      color: #4fc3f7;
+      border: 1px solid rgba(79,195,247,0.4);
+    }
+
+    #btn-settings-ok:hover {
+      background: rgba(79,195,247,0.4);
+    }
+
+    #btn-settings-cancel {
+      background: rgba(255,255,255,0.05);
+      color: #78909c;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+
+    #btn-settings-cancel:hover {
+      background: rgba(255,255,255,0.1);
+      color: #ccc;
+    }
+
+    /* ---- 面板折叠 ---- */
+    #stats-panel .panel-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    #stats-panel .panel-toggle {
+      cursor: pointer;
+      color: #607d8b;
+      font-size: 14px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: all 0.15s;
+      user-select: none;
+    }
+
+    #stats-panel .panel-toggle:hover {
+      color: #4fc3f7;
+      background: rgba(79,195,247,0.1);
+    }
+
+    #stats-panel.collapsed #stats-panel-body {
+      display: none;
+    }
+
+    #stats-panel.collapsed {
+      min-width: auto;
+    }
+
+    #stats-panel.collapsed h3 {
+      margin-bottom: 0;
+    }
+
+    /* ---- 底部走势图面板 ---- */
+    #chart-panel {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: rgba(0, 0, 0, 0.82);
+      backdrop-filter: blur(10px);
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      pointer-events: auto;
+      z-index: 20;
+      transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    #chart-panel.collapsed {
+      transform: translateY(calc(100% - 34px));
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 7px 16px;
+      cursor: pointer;
+      user-select: none;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .chart-header h4 {
+      color: #4fc3f7;
+      font-size: 13px;
+      font-weight: 500;
+      margin: 0;
+      letter-spacing: 0.5px;
+    }
+
+    .chart-toggle {
+      color: #607d8b;
+      font-size: 12px;
+      transition: transform 0.35s ease;
+    }
+
+    #chart-panel.collapsed .chart-toggle {
+      transform: rotate(180deg);
+    }
+
+    #chart-body {
+      padding: 8px 12px 10px;
+      overflow: hidden;
+    }
+
+    #chart-canvas {
+      display: block;
+      width: 100%;
+      height: 140px;
+      border-radius: 6px;
+    }
+
+    /* ---- 调整生命体详情面板，避免遮挡走势图 ---- */
+    #organism-panel {
+      bottom: 200px;
+    }
+
+  </style>
+</head>
+<body>
+  <div id="canvas-container">
+    <div id="ui-overlay">
+      <div id="stats-panel" style="display:none;">
+        <div class="panel-header-row">
+          <h3>🌍 ALife 模拟器</h3>
+          <span class="panel-toggle" id="panel-toggle-icon">◀</span>
+        </div>
+        <div id="stats-panel-body">
+        <div class="stat-row">
+          <span class="stat-label">世代</span>
+          <span class="stat-value" id="stat-tick">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">生命体</span>
+          <span class="stat-value" id="stat-organisms">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">🦠 微生物</span>
+          <span class="stat-value" id="stat-microbes">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">🌿 植物</span>
+          <span class="stat-value" id="stat-plants">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">🦗 昆虫</span>
+          <span class="stat-value" id="stat-insects">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">🐾 动物</span>
+          <span class="stat-value" id="stat-animals">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">出生</span>
+          <span class="stat-value" id="stat-births">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">死亡 (总计)</span>
+          <span class="stat-value" id="stat-deaths">0</span>
+        </div>
+        <div style="margin: 6px 0 2px; color: #4fc3f7; font-size: 12px; font-weight: 500;">☠ 死因分布</div>
+        <div class="stat-row">
+          <span class="stat-label">🦴 饿死</span>
+          <span class="stat-value" id="stat-death-starvation">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">⏳ 老死</span>
+          <span class="stat-value" id="stat-death-oldage">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">🩸 被捕食</span>
+          <span class="stat-value" id="stat-death-predation">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">👥 过密竞争</span>
+          <span class="stat-value" id="stat-death-overcrowding">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">🦠 疾病</span>
+          <span class="stat-value" id="stat-death-disease">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">🌪 环境灾害</span>
+          <span class="stat-value" id="stat-death-environmental">0</span>
+        </div>
+        <div style="margin: 6px 0 2px; color: #4fc3f7; font-size: 12px; font-weight: 500;">🌍 环境</div>
+        <div class="stat-row">
+          <span class="stat-label">时刻</span>
+          <span class="stat-value" id="stat-time">☀️ 清晨</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">CO₂ 浓度</span>
+          <span class="stat-value" id="stat-co2">1.000</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">FPS</span>
+          <span class="stat-value" id="stat-fps">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">模拟 TPS</span>
+          <span class="stat-value" id="stat-tps">0</span>
+        </div>
+        <div id="species-container">
+          <div class="stat-row" style="margin-top: 8px;">
+            <span class="stat-label">物种数</span>
+            <span class="stat-value" id="stat-species">0</span>
+          </div>
+          <div class="species-list" id="species-list"></div>
+        </div>
+        </div>
+      </div>
+      <div id="controls-panel" style="display:none;">
+        <div>
+          <button id="btn-pause">⏸ 暂停</button>
+          <button id="btn-restart" style="display:none;">🔄 重新开始</button>
+          <button id="btn-speed1" class="active">1x</button>
+          <button id="btn-speed2">2x</button>
+          <button id="btn-speed5">5x</button>
+        </div>
+      </div>
+
+      <!-- 物种数量走势图 -->
+      <div id="chart-panel" class="collapsed" style="display:none;">
+        <div class="chart-header" id="chart-toggle-btn">
+          <h4>📊 物种数量走势</h4>
+          <span class="chart-toggle">▼</span>
+        </div>
+        <div id="chart-body">
+          <canvas id="chart-canvas"></canvas>
+        </div>
+      </div>
+
+      <!-- 生命体详情面板 -->
+      <div id="organism-panel">
+        <div class="panel-header">
+          <h4 id="org-title">🔍 生命体详情</h4>
+          <span class="panel-close" id="org-panel-close">✕</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">ID</span>
+          <span class="info-value" id="org-id">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">类型</span>
+          <span class="info-value" id="org-type">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">物种</span>
+          <span class="info-value" id="org-species">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">能量</span>
+          <span class="info-value" id="org-energy">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">年龄</span>
+          <span class="info-value" id="org-age">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">健康</span>
+          <span class="info-value" id="org-health">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">体型</span>
+          <span class="info-value" id="org-size">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">位置</span>
+          <span class="info-value" id="org-position">-</span>
+        </div>
+        <div class="dna-section">
+          <h5>🧬 DNA 基因组</h5>
+          <div id="org-dna-bars"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 启动画面 -->
+    <div id="start-screen">
+      <div class="start-content">
+        <div class="start-logo">🌍</div>
+        <h1 class="start-title">ALife</h1>
+        <p class="start-subtitle">人工生命演化模拟器</p>
+        <p class="start-desc">在虚拟 3D 世界中观察生命的诞生、演化与自然选择</p>
+        <div class="start-buttons">
+          <button class="start-btn primary" id="btn-start-sim">🚀 开始模拟</button>
+          <button class="start-btn secondary" id="btn-open-settings">⚙ 设置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 设置弹窗 -->
+    <div id="settings-modal" style="display:none;">
+      <div class="settings-card">
+        <h2>⚙ 模拟参数设置</h2>
+        <div class="settings-section">
+          <h3>🧬 物种初始数量</h3>
+          <div class="setting-row">
+            <label>🦠 微生物</label>
+            <input type="number" id="cfg-initialMicrobes" value="400" min="0" max="3000" step="10">
+          </div>
+          <div class="setting-row">
+            <label>🌿 植物</label>
+            <input type="number" id="cfg-initialPlants" value="600" min="0" max="3000" step="10">
+          </div>
+          <div class="setting-row">
+            <label>🦗 昆虫</label>
+            <input type="number" id="cfg-initialInsects" value="200" min="0" max="2000" step="10">
+          </div>
+          <div class="setting-row">
+            <label>🐾 动物</label>
+            <input type="number" id="cfg-initialAnimals" value="80" min="0" max="1000" step="10">
+          </div>
+        </div>
+        <div class="settings-section">
+          <h3>🌍 环境参数</h3>
+          <div class="setting-row">
+            <label>世界大小</label>
+            <input type="number" id="cfg-worldSize" value="500" min="100" max="2000" step="50">
+          </div>
+          <div class="setting-row">
+            <label>🦠 微生物上限</label>
+            <input type="number" id="cfg-maxMicrobes" value="1500" min="100" max="5000" step="50">
+          </div>
+          <div class="setting-row">
+            <label>🌿 植物上限</label>
+            <input type="number" id="cfg-maxPlants" value="1200" min="100" max="5000" step="50">
+          </div>
+          <div class="setting-row">
+            <label>🦠 微生物增长率</label>
+            <input type="number" id="cfg-microbeGrowthRate" value="5" min="0" max="20" step="1">
+          </div>
+          <div class="setting-row">
+            <label>🌱 植物增长率</label>
+            <input type="number" id="cfg-plantGrowthRate" value="4" min="0" max="20" step="1">
+          </div>
+          <div class="setting-row">
+            <label>⚡ 植物能量</label>
+            <input type="number" id="cfg-plantEnergy" value="30" min="5" max="200" step="5">
+          </div>
+          <div class="setting-row">
+            <label>⏱ 模拟 TPS</label>
+            <input type="number" id="cfg-ticksPerSecond" value="30" min="5" max="120" step="5">
+          </div>
+        </div>
+        <div class="settings-footer">
+          <button id="btn-settings-cancel">✕ 取消</button>
+          <button id="btn-settings-ok">✓ 确认</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
