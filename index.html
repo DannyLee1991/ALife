@@ -148,11 +148,14 @@
       line-height: 1.7;
       min-width: 260px;
       max-width: 320px;
+      max-height: calc(100vh - 80px);
+      overflow-y: auto;
       backdrop-filter: blur(12px);
       border: 1px solid rgba(0, 255, 255, 0.25);
       pointer-events: auto;
       display: none;
       box-shadow: 0 4px 20px rgba(0, 255, 255, 0.1);
+      z-index: 15;
     }
 
     #organism-panel.visible {
@@ -214,17 +217,72 @@
       font-size: 12px;
     }
 
+    /* ---- 3D 模型预览 ---- */
+    #organism-panel .model-preview {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin: 6px 0 4px;
+      border-radius: 8px;
+      overflow: hidden;
+      background: radial-gradient(ellipse at center, rgba(0,80,100,0.25) 0%, rgba(0,0,0,0.35) 100%);
+      border: 1px solid rgba(0, 255, 255, 0.1);
+    }
+
+    #organism-panel .model-preview canvas {
+      display: block;
+      width: 100%;
+      height: 120px;
+      border-radius: 8px;
+    }
+
+    /* ---- DNA 基因组折叠区域 ---- */
     #organism-panel .dna-section {
       margin-top: 8px;
       padding-top: 6px;
       border-top: 1px solid rgba(255, 255, 255, 0.08);
     }
 
-    #organism-panel .dna-section h5 {
+    #organism-panel .dna-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+      padding: 2px 0;
+    }
+
+    #organism-panel .dna-section-header:hover {
+      opacity: 0.85;
+    }
+
+    #organism-panel .dna-section-header h5 {
       color: #00e5ff;
       font-size: 12px;
       font-weight: 500;
-      margin: 0 0 4px 0;
+      margin: 0;
+    }
+
+    #organism-panel .dna-toggle {
+      color: #00e5ff;
+      font-size: 10px;
+      transition: transform 0.25s ease;
+    }
+
+    #organism-panel .dna-section.collapsed .dna-toggle {
+      transform: rotate(-90deg);
+    }
+
+    #organism-panel .dna-section-body {
+      overflow: hidden;
+      max-height: 500px;
+      transition: max-height 0.3s ease, opacity 0.25s ease;
+      opacity: 1;
+    }
+
+    #organism-panel .dna-section.collapsed .dna-section-body {
+      max-height: 0;
+      opacity: 0;
     }
 
     #organism-panel .dna-bar-row {
@@ -583,7 +641,7 @@
 
     /* ---- 调整生命体详情面板，避免遮挡走势图 ---- */
     #organism-panel {
-      bottom: 200px;
+      bottom: 16px;
     }
 
   </style>
@@ -664,6 +722,14 @@
           <span class="stat-value" id="stat-co2">1.000</span>
         </div>
         <div class="stat-row">
+          <span class="stat-label">O₂ 浓度</span>
+          <span class="stat-value" id="stat-o2">1.000</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">有害气体</span>
+          <span class="stat-value" id="stat-toxic">0.000</span>
+        </div>
+        <div class="stat-row">
           <span class="stat-label">FPS</span>
           <span class="stat-value" id="stat-fps">0</span>
         </div>
@@ -739,9 +805,31 @@
           <span class="info-label">位置</span>
           <span class="info-value" id="org-position">-</span>
         </div>
-        <div class="dna-section">
-          <h5>🧬 DNA 基因组</h5>
-          <div id="org-dna-bars"></div>
+        <div class="info-row" id="org-gender-row">
+          <span class="info-label">性别</span>
+          <span class="info-value" id="org-gender">-</span>
+        </div>
+        <div class="info-row" id="org-satiety-row">
+          <span class="info-label">饱腹度</span>
+          <span class="info-value" id="org-satiety">-</span>
+        </div>
+        <div class="info-row" id="org-estrus-row">
+          <span class="info-label">繁殖状态</span>
+          <span class="info-value" id="org-repro-status">-</span>
+        </div>
+        <!-- 3D 模型预览 -->
+        <div class="model-preview">
+          <canvas id="org-preview-canvas" width="280" height="120"></canvas>
+        </div>
+        <!-- DNA 基因组（默认折叠） -->
+        <div class="dna-section collapsed" id="dna-section">
+          <div class="dna-section-header" id="dna-section-toggle">
+            <h5>🧬 DNA 基因组</h5>
+            <span class="dna-toggle">▼</span>
+          </div>
+          <div class="dna-section-body">
+            <div id="org-dna-bars"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -784,11 +872,37 @@
           </div>
         </div>
         <div class="settings-section">
-          <h3>🌍 环境参数</h3>
+          <h3>🎲 随机种子</h3>
+          <div class="setting-row">
+            <label>种子（-1=随机）</label>
+            <input type="number" id="cfg-seed" value="-1" min="-1" max="999999999" step="1">
+          </div>
+        </div>
+        <div class="settings-section">
+          <h3>🏔 地形设置</h3>
           <div class="setting-row">
             <label>世界大小</label>
             <input type="number" id="cfg-worldSize" value="500" min="100" max="2000" step="50">
           </div>
+          <div class="setting-row">
+            <label>⛰ 山脉高度</label>
+            <input type="number" id="cfg-terrainHeight" value="1.0" min="0.2" max="3.0" step="0.1">
+          </div>
+          <div class="setting-row">
+            <label>🌀 地形起伏</label>
+            <input type="number" id="cfg-terrainRoughness" value="1.0" min="0.2" max="3.0" step="0.1">
+          </div>
+          <div class="setting-row">
+            <label>💧 水位高度</label>
+            <input type="number" id="cfg-waterLevel" value="1.5" min="0.0" max="5.0" step="0.1">
+          </div>
+          <div class="setting-row">
+            <label>🌊 河流宽度</label>
+            <input type="number" id="cfg-riverWidth" value="1.0" min="0.0" max="3.0" step="0.1">
+          </div>
+        </div>
+        <div class="settings-section">
+          <h3>🌍 环境参数</h3>
           <div class="setting-row">
             <label>🦠 微生物上限</label>
             <input type="number" id="cfg-maxMicrobes" value="1500" min="100" max="5000" step="50">
@@ -811,7 +925,7 @@
           </div>
           <div class="setting-row">
             <label>⏱ 模拟 TPS</label>
-            <input type="number" id="cfg-ticksPerSecond" value="30" min="5" max="120" step="5">
+            <input type="number" id="cfg-ticksPerSecond" value="10" min="1" max="30" step="1">
           </div>
         </div>
         <div class="settings-footer">

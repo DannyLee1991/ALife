@@ -6,17 +6,19 @@
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { OrganismType, OrganismRenderData } from '../types';
+import { OrganismType, OrganismRenderData, Gene, SeededRandom } from '../types';
+import type { WorldConfig, EggRenderData } from '../types';
 
 // ---- 常量 ----
 const MAX_MICROBES = 800;
 const MAX_PLANTS = 1000;
 const MAX_INSECTS = 600;
 const MAX_ANIMALS = 400;
+const MAX_EGGS = 300;
 
 const TERRAIN_SIZE = 600;
 const TERRAIN_SEGMENTS = 200;
-const WATER_LEVEL = 1.5;
+const DEFAULT_WATER_LEVEL = 1.5;
 
 /** 一个完整昼夜循环的秒数（180s = 3分钟） */
 const DAY_DURATION = 180;
@@ -34,12 +36,12 @@ interface DayPhase {
 }
 
 const DAY_PHASES: DayPhase[] = [
-  // 午夜（提高最低光照，保证地形轮廓可辨识）
-  { time: 0.00, sky: 0x0c0c1a, fog: 0x06060e, sunColor: 0x334466, sunIntensity: 0.06, ambientIntensity: 0.18, hemiSky: 0x0e0e2a, hemiGround: 0x0a0a0a },
+  // 午夜（月光 + 星光照亮地面，保证地形清晰可辨）
+  { time: 0.00, sky: 0x0c0c1a, fog: 0x0a0a18, sunColor: 0x445588, sunIntensity: 0.12, ambientIntensity: 0.35, hemiSky: 0x141430, hemiGround: 0x1a1a28 },
   // 黎明前
-  { time: 0.20, sky: 0x181838, fog: 0x0e0e28, sunColor: 0x445577, sunIntensity: 0.10, ambientIntensity: 0.22, hemiSky: 0x181848, hemiGround: 0x0c0c0c },
+  { time: 0.20, sky: 0x181838, fog: 0x121230, sunColor: 0x556688, sunIntensity: 0.15, ambientIntensity: 0.38, hemiSky: 0x1c1c50, hemiGround: 0x1e1e2a },
   // 日出
-  { time: 0.26, sky: 0xcc6633, fog: 0x884422, sunColor: 0xff8844, sunIntensity: 0.65, ambientIntensity: 0.35, hemiSky: 0xff9966, hemiGround: 0x2a1a0a },
+  { time: 0.26, sky: 0xcc6633, fog: 0x884422, sunColor: 0xff8844, sunIntensity: 0.65, ambientIntensity: 0.40, hemiSky: 0xff9966, hemiGround: 0x2a1a0a },
   // 清晨
   { time: 0.34, sky: 0x5da0d0, fog: 0x7ab8dc, sunColor: 0xffeedd, sunIntensity: 1.00, ambientIntensity: 0.50, hemiSky: 0x88ccee, hemiGround: 0x3a2a1a },
   // 正午
@@ -47,11 +49,11 @@ const DAY_PHASES: DayPhase[] = [
   // 下午
   { time: 0.65, sky: 0x5da0d0, fog: 0x7ab8dc, sunColor: 0xffeedd, sunIntensity: 1.00, ambientIntensity: 0.50, hemiSky: 0x88ccee, hemiGround: 0x3a2a1a },
   // 日落
-  { time: 0.74, sky: 0xcc5522, fog: 0x773311, sunColor: 0xff5533, sunIntensity: 0.55, ambientIntensity: 0.30, hemiSky: 0xff6644, hemiGround: 0x220a04 },
+  { time: 0.74, sky: 0xcc5522, fog: 0x773311, sunColor: 0xff5533, sunIntensity: 0.55, ambientIntensity: 0.35, hemiSky: 0xff6644, hemiGround: 0x2a1508 },
   // 黄昏
-  { time: 0.82, sky: 0x181838, fog: 0x0e0e28, sunColor: 0x445577, sunIntensity: 0.10, ambientIntensity: 0.22, hemiSky: 0x181848, hemiGround: 0x0c0c0c },
+  { time: 0.82, sky: 0x181838, fog: 0x121230, sunColor: 0x556688, sunIntensity: 0.15, ambientIntensity: 0.38, hemiSky: 0x1c1c50, hemiGround: 0x1e1e2a },
   // 回到午夜（与 time=0.00 一致，保证循环平滑）
-  { time: 1.00, sky: 0x0c0c1a, fog: 0x06060e, sunColor: 0x334466, sunIntensity: 0.06, ambientIntensity: 0.18, hemiSky: 0x0e0e2a, hemiGround: 0x0a0a0a },
+  { time: 1.00, sky: 0x0c0c1a, fog: 0x0a0a18, sunColor: 0x445588, sunIntensity: 0.12, ambientIntensity: 0.35, hemiSky: 0x141430, hemiGround: 0x1a1a28 },
 ];
 
 export class Renderer {
@@ -65,10 +67,21 @@ export class Renderer {
   private plantMesh!: THREE.InstancedMesh;
   private insectMesh!: THREE.InstancedMesh;
   private animalMesh!: THREE.InstancedMesh;
+  private eggMesh!: THREE.InstancedMesh;
 
-  // ---- 临时对象 ----
+  // ---- 临时对象（预分配，避免热路径中 GC 抖动）----
   private tempMatrix = new THREE.Matrix4();
   private tempColor = new THREE.Color();
+  private tempVec3A = new THREE.Vector3();
+  private tempVec3B = new THREE.Vector3();
+  private tempVec3C = new THREE.Vector3();
+  private tempQuat = new THREE.Quaternion();
+  private tempScaleVec = new THREE.Vector3();
+  private readonly yAxis = new THREE.Vector3(0, 1, 0);
+  private readonly aquaticBlendColor = new THREE.Color(0x2288aa);
+  // 昼夜颜色插值用（避免每帧 new Color）
+  private dnColorA = new THREE.Color();
+  private dnColorB = new THREE.Color();
 
   // ---- 相机控制 ----
   private cameraTarget = new THREE.Vector3(0, 20, 0);
@@ -99,11 +112,14 @@ export class Renderer {
   private ambientLight!: THREE.AmbientLight;
   private hemiLight!: THREE.HemisphereLight;
 
-  // ---- 水面 ----
+  // ---- 地形 & 水面 ----
+  private terrainMesh!: THREE.Mesh;
   private waterMesh!: THREE.Mesh;
 
-  // ---- 星空 ----
+  // ---- 星空 & 月亮 ----
   private starsMesh!: THREE.Points;
+  private moonGroup!: THREE.Group;      // 月亮组（球体 + 光晕）
+  private moonLight!: THREE.PointLight; // 月光光源
 
   // ---- 昼夜 ----
   /** 累计运行时间（毫秒），暂停时不增长 */
@@ -114,6 +130,29 @@ export class Renderer {
   /** 当前时刻 [0, 1)：0=午夜, 0.25=日出, 0.5=正午, 0.75=日落 */
   dayTime = 0.3; // 从清晨开始
 
+  /** 当前夜晚程度 [0, 1]：0=白天, 1=深夜（由 updateDayNight 更新） */
+  private nightness = 0;
+
+  // ---- 地形参数（由配置控制，支持种子确定性） ----
+  private terrainSeed = 0;
+  private terrainHeight = 1.0;
+  private terrainRoughness = 1.0;
+  private waterLevel = DEFAULT_WATER_LEVEL;
+  private riverWidth = 1.0;
+
+  // ---- 种子派生的随机偏移（让不同种子产生完全不同的地形结构） ----
+  private noiseOffsetX1 = 100;   // 主地形噪声 X 偏移
+  private noiseOffsetZ1 = 100;   // 主地形噪声 Z 偏移
+  private noiseOffsetX2 = 50;    // 山脉噪声 X 偏移
+  private noiseOffsetZ2 = 50;    // 山脉噪声 Z 偏移
+  private river1Phase = 0;       // 河流1 相位偏移
+  private river1Amp1 = 65;       // 河流1 摆幅1
+  private river1Amp2 = 110;      // 河流1 摆幅2
+  private river2Phase = 0;       // 河流2 相位偏移
+  private river2Amp1 = 55;       // 河流2 摆幅1
+  private river2Amp2 = 95;       // 河流2 摆幅2
+  private river2Offset = 30;     // 河流2 Z 轴偏移
+
   // ---- 预计算高度图（用于快速查询地形高度）----
   private heightMap!: Float32Array;
   private heightMapRes = TERRAIN_SEGMENTS + 1;
@@ -123,6 +162,7 @@ export class Renderer {
   private plantMat!: THREE.MeshStandardMaterial;
   private insectMat!: THREE.MeshStandardMaterial;
   private animalMat!: THREE.MeshStandardMaterial;
+  private eggMat!: THREE.MeshStandardMaterial;
 
   // ---- 选中交互 ----
   private paused = false;
@@ -132,6 +172,20 @@ export class Renderer {
 
   /** 最后一帧的所有生命体数据（用于点击选中） */
   private lastOrganisms: OrganismRenderData[] = [];
+
+  // ---- 帧间插值（消除卡顿/闪烁）----
+  /** 上一帧各生命体的位置和朝向（用于插值） */
+  private prevPositions = new Map<number, { x: number; z: number; facing: number }>();
+  /** 当前目标帧的生命体数据 */
+  private targetOrganisms: OrganismRenderData[] = [];
+  /** 当前目标帧的蛋数据 */
+  private targetEggs: EggRenderData[] = [];
+  /** 上次收到 Worker 数据的时间戳 */
+  private lastWorkerTime = 0;
+  /** Worker 帧间隔（毫秒），自适应追踪 */
+  private workerDt = 33;
+  /** 是否需要更新实例颜色（仅在收到新数据时） */
+  private needsColorUpdate = false;
 
   /** 当前选中的生命体数据 */
   private selectedOrganism: OrganismRenderData | null = null;
@@ -217,15 +271,71 @@ export class Renderer {
     this.focusAnimating = false;
     this.isFollowing = false;
 
+    // 清空插值状态
+    this.prevPositions.clear();
+    this.targetOrganisms = [];
+    this.targetEggs = [];
+    this.lastWorkerTime = 0;
+    this.workerDt = 33;
+    this.needsColorUpdate = false;
+
     // 清空所有实例网格
     this.microbeMesh.count = 0;
     this.plantMesh.count = 0;
     this.insectMesh.count = 0;
     this.animalMesh.count = 0;
-    const meshes = [this.microbeMesh, this.plantMesh, this.insectMesh, this.animalMesh];
+    this.eggMesh.count = 0;
+    const meshes = [this.microbeMesh, this.plantMesh, this.insectMesh, this.animalMesh, this.eggMesh];
     for (const mesh of meshes) {
       mesh.instanceMatrix.needsUpdate = true;
     }
+  }
+
+  // ================================================================
+  //  应用地形配置（种子 + 地形参数）
+  // ================================================================
+
+  /**
+   * 应用 WorldConfig 中的地形参数并重建地形
+   * 在 startSimulation 中调用
+   */
+  applyTerrainConfig(config: WorldConfig): void {
+    this.terrainSeed = config.seed;
+    this.terrainHeight = config.terrainHeight;
+    this.terrainRoughness = config.terrainRoughness;
+    this.waterLevel = config.waterLevel;
+    this.riverWidth = config.riverWidth;
+
+    // 用种子生成一系列确定性偏移，让不同种子产生完全不同的地形和河流布局
+    const rng = new SeededRandom(config.seed ^ 0xA5A5A5A5);
+    this.noiseOffsetX1 = rng.nextRange(-500, 500);
+    this.noiseOffsetZ1 = rng.nextRange(-500, 500);
+    this.noiseOffsetX2 = rng.nextRange(-500, 500);
+    this.noiseOffsetZ2 = rng.nextRange(-500, 500);
+    this.river1Phase = rng.nextRange(0, Math.PI * 2);
+    this.river1Amp1 = 40 + rng.next() * 60;   // 40~100
+    this.river1Amp2 = 70 + rng.next() * 80;   // 70~150
+    this.river2Phase = rng.nextRange(0, Math.PI * 2);
+    this.river2Amp1 = 30 + rng.next() * 50;   // 30~80
+    this.river2Amp2 = 60 + rng.next() * 70;   // 60~130
+    this.river2Offset = rng.nextRange(-80, 80);
+
+    // 移除旧的地形和水面
+    if (this.terrainMesh) {
+      this.scene.remove(this.terrainMesh);
+      this.terrainMesh.geometry.dispose();
+      (this.terrainMesh.material as THREE.Material).dispose();
+    }
+    if (this.waterMesh) {
+      this.scene.remove(this.waterMesh);
+      this.waterMesh.geometry.dispose();
+      (this.waterMesh.material as THREE.Material).dispose();
+    }
+
+    // 用新参数重建高度图、地形、水面
+    this.buildHeightMap();
+    this.createTerrain();
+    this.createWater();
   }
 
   // ================================================================
@@ -233,7 +343,7 @@ export class Renderer {
   // ================================================================
 
   private hash2D(ix: number, iy: number): number {
-    let h = (ix * 374761393 + iy * 668265263) | 0;
+    let h = (ix * 374761393 + iy * 668265263 + this.terrainSeed * 1013904223) | 0;
     h = ((h ^ (h >> 13)) * 1274126177) | 0;
     h = (h ^ (h >> 16)) | 0;
     return (h & 0xffff) / 0xffff;
@@ -275,34 +385,44 @@ export class Renderer {
 
   /** 计算世界坐标 (x, z) 处的原始地形高度 */
   private computeRawHeight(worldX: number, worldZ: number): number {
-    const s = 0.006;
+    const s = 0.006 * this.terrainRoughness;
+    const heightMul = this.terrainHeight;
 
-    // 主地形：连绵丘陵
-    let h = (this.fbm(worldX * s + 100, worldZ * s + 100, 6) - 0.35) * 22;
+    // 主地形：连绵丘陵（偏移量由种子决定，不同种子 → 完全不同的地形布局）
+    let h = (this.fbm(worldX * s + this.noiseOffsetX1, worldZ * s + this.noiseOffsetZ1, 6) - 0.35) * 22 * heightMul;
 
     // 大尺度山脉：用 pow 让高处更陡峭
-    const mountain = this.fbm(worldX * 0.003 + 50, worldZ * 0.003 + 50, 4);
-    h += Math.pow(Math.max(0, mountain - 0.35), 1.6) * 70;
+    const mountain = this.fbm(
+      worldX * 0.003 * this.terrainRoughness + this.noiseOffsetX2,
+      worldZ * 0.003 * this.terrainRoughness + this.noiseOffsetZ2, 4
+    );
+    h += Math.pow(Math.max(0, mountain - 0.35), 1.6) * 70 * heightMul;
 
     // 细节起伏
-    h += (this.noise2D(worldX * 0.03, worldZ * 0.03) - 0.5) * 2.5;
+    h += (this.noise2D(worldX * 0.03 + this.noiseOffsetX1 * 0.1, worldZ * 0.03 + this.noiseOffsetZ1 * 0.1) - 0.5) * 2.5 * heightMul;
 
-    // ---- 河流1：蜿蜒主河（大致南北方向）----
-    const riverX = Math.sin(worldZ * 0.01) * 65 + Math.sin(worldZ * 0.003) * 110;
-    const dRiver = Math.abs(worldX - riverX);
-    const riverWidth = 24;
-    if (dRiver < riverWidth) {
-      const t = 1 - dRiver / riverWidth;
-      h -= t * t * 12;
-    }
+    // ---- 河流（位置/形态由种子决定，宽度受 riverWidth 参数控制）----
+    if (this.riverWidth > 0) {
+      // 河流1：蜿蜒主河（大致南北方向，相位和振幅由种子决定）
+      const riverX = Math.sin(worldZ * 0.01 + this.river1Phase) * this.river1Amp1
+                   + Math.sin(worldZ * 0.003 + this.river1Phase * 0.7) * this.river1Amp2;
+      const dRiver = Math.abs(worldX - riverX);
+      const rw1 = 24 * this.riverWidth;
+      if (dRiver < rw1) {
+        const t = 1 - dRiver / rw1;
+        h -= t * t * 12;
+      }
 
-    // ---- 河流2：东西方向支流 ----
-    const river2Z = Math.cos(worldX * 0.008) * 55 + Math.cos(worldX * 0.002) * 95 + 30;
-    const dRiver2 = Math.abs(worldZ - river2Z);
-    const river2Width = 18;
-    if (dRiver2 < river2Width) {
-      const t = 1 - dRiver2 / river2Width;
-      h -= t * t * 9;
+      // 河流2：东西方向支流（相位、振幅、偏移由种子决定）
+      const river2Z = Math.cos(worldX * 0.008 + this.river2Phase) * this.river2Amp1
+                    + Math.cos(worldX * 0.002 + this.river2Phase * 0.6) * this.river2Amp2
+                    + this.river2Offset;
+      const dRiver2 = Math.abs(worldZ - river2Z);
+      const rw2 = 18 * this.riverWidth;
+      if (dRiver2 < rw2) {
+        const t = 1 - dRiver2 / rw2;
+        h -= t * t * 9;
+      }
     }
 
     // 边缘渐降（避免地图边界出现悬崖）
@@ -396,24 +516,24 @@ export class Renderer {
       metalness: 0.05,
     });
 
-    const terrain = new THREE.Mesh(geo, mat);
-    this.scene.add(terrain);
+    this.terrainMesh = new THREE.Mesh(geo, mat);
+    this.scene.add(this.terrainMesh);
   }
 
   /** 根据高度返回地形颜色 */
   private getTerrainColor(h: number): [number, number, number] {
-    if (h < WATER_LEVEL - 3) {
+    if (h < this.waterLevel - 3) {
       // 深水底：暗沙色
       return [0.35, 0.30, 0.20];
-    } else if (h < WATER_LEVEL - 0.5) {
+    } else if (h < this.waterLevel - 0.5) {
       // 浅水底：沙色
       return [0.55, 0.48, 0.32];
-    } else if (h < WATER_LEVEL + 1) {
+    } else if (h < this.waterLevel + 1) {
       // 河岸/沙滩
       return [0.72, 0.65, 0.42];
     } else if (h < 5) {
       // 草地：从浅绿渐变到绿
-      const t = Math.max(0, Math.min(1, (h - WATER_LEVEL) / 3.5));
+      const t = Math.max(0, Math.min(1, (h - this.waterLevel) / 3.5));
       return [
         0.22 - t * 0.05,
         0.50 + t * 0.12,
@@ -468,14 +588,16 @@ export class Renderer {
     });
 
     this.waterMesh = new THREE.Mesh(geo, mat);
-    this.waterMesh.position.y = WATER_LEVEL;
+    this.waterMesh.position.y = this.waterLevel;
     this.scene.add(this.waterMesh);
   }
 
-  /** 创建星空（夜间显示） */
+  /** 创建星空（多层亮度 + 大小变化，夜间显示） */
   private createStars(): void {
-    const starCount = 600;
+    const starCount = 1200;
     const positions = new Float32Array(starCount * 3);
+    const sizes = new Float32Array(starCount);
+    const colors = new Float32Array(starCount * 3);
 
     for (let i = 0; i < starCount; i++) {
       const theta = Math.random() * Math.PI * 2;
@@ -484,21 +606,79 @@ export class Renderer {
       positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
       positions[i * 3 + 1] = r * Math.cos(phi);
       positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+
+      // 星星大小分布：大部分小星 + 少量亮星
+      const brightness = Math.random();
+      sizes[i] = brightness < 0.9 ? 1.0 + Math.random() * 1.5
+                                  : 2.5 + Math.random() * 2.0;
+
+      // 星色微变：白/淡蓝/淡黄
+      const colorRand = Math.random();
+      if (colorRand < 0.6) {
+        // 白色
+        colors[i * 3] = 1.0; colors[i * 3 + 1] = 1.0; colors[i * 3 + 2] = 1.0;
+      } else if (colorRand < 0.8) {
+        // 淡蓝
+        colors[i * 3] = 0.75; colors[i * 3 + 1] = 0.85; colors[i * 3 + 2] = 1.0;
+      } else {
+        // 淡黄
+        colors[i * 3] = 1.0; colors[i * 3 + 1] = 0.95; colors[i * 3 + 2] = 0.7;
+      }
     }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
     const mat = new THREE.PointsMaterial({
-      color: 0xffffff,
       size: 2,
       transparent: true,
       opacity: 0,
       sizeAttenuation: false,
+      vertexColors: true,   // 使用每顶点颜色
     });
 
     this.starsMesh = new THREE.Points(geo, mat);
     this.scene.add(this.starsMesh);
+
+    // ---- 月亮 ----
+    this.createMoon();
+  }
+
+  /** 创建月亮（球体 + 发光光晕 + 月光光源） */
+  private createMoon(): void {
+    this.moonGroup = new THREE.Group();
+
+    // 月球体
+    const moonGeo = new THREE.SphereGeometry(15, 32, 32);
+    const moonMat = new THREE.MeshStandardMaterial({
+      color: 0xf5f0e0,
+      emissive: 0xddd8c8,
+      emissiveIntensity: 0.6,
+      roughness: 0.9,
+      metalness: 0.0,
+    });
+    const moonSphere = new THREE.Mesh(moonGeo, moonMat);
+    this.moonGroup.add(moonSphere);
+
+    // 月亮光晕（半透明大球）
+    const glowGeo = new THREE.SphereGeometry(25, 32, 32);
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0xccd4e8,
+      transparent: true,
+      opacity: 0.08,
+      side: THREE.BackSide,
+    });
+    const glowMesh = new THREE.Mesh(glowGeo, glowMat);
+    this.moonGroup.add(glowMesh);
+
+    this.moonGroup.visible = false;
+    this.scene.add(this.moonGroup);
+
+    // 月光光源（柔和的定向补充光）
+    this.moonLight = new THREE.PointLight(0x8899bb, 0, 800);
+    this.moonGroup.add(this.moonLight);
   }
 
   /** 创建灯光 */
@@ -535,13 +715,14 @@ export class Renderer {
     this.microbeMesh.count = 0;
     this.scene.add(this.microbeMesh);
 
-    // ---- 🌿 植物 — 树木（树干 + 树冠） ----
+    // ---- 🌿 植物 — 树木（树干 + 分枝 + 多层树叶） ----
     const plantGeo = this.buildPlantGeometry();
     this.plantMat = new THREE.MeshStandardMaterial({
       color: 0x33aa33,
       roughness: 0.75,
       emissive: 0x228822,
       emissiveIntensity: 0,
+      side: THREE.DoubleSide,  // 叶簇需要双面可见
     });
     this.plantMesh = new THREE.InstancedMesh(plantGeo, this.plantMat, MAX_PLANTS);
     this.plantMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -576,12 +757,28 @@ export class Renderer {
     this.animalMesh.count = 0;
     this.scene.add(this.animalMesh);
 
+    // ---- 🥚 蛋 — 椭圆体 ----
+    const eggGeo = new THREE.SphereGeometry(0.4, 8, 6);
+    eggGeo.scale(1, 1.3, 1); // 椭圆形蛋
+    this.eggMat = new THREE.MeshStandardMaterial({
+      color: 0xf5e6c8,
+      roughness: 0.4,
+      metalness: 0.05,
+      emissive: 0xf5e6c8,
+      emissiveIntensity: 0,
+    });
+    this.eggMesh = new THREE.InstancedMesh(eggGeo, this.eggMat, MAX_EGGS);
+    this.eggMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.eggMesh.count = 0;
+    this.scene.add(this.eggMesh);
+
     // 启用实例颜色
     const meshConfigs: [THREE.InstancedMesh, number][] = [
       [this.microbeMesh, MAX_MICROBES],
       [this.plantMesh, MAX_PLANTS],
       [this.insectMesh, MAX_INSECTS],
       [this.animalMesh, MAX_ANIMALS],
+      [this.eggMesh, MAX_EGGS],
     ];
     for (const [mesh, maxCount] of meshConfigs) {
       if (!mesh.instanceColor) {
@@ -589,6 +786,9 @@ export class Renderer {
           new Float32Array(maxCount * 3), 3
         );
       }
+      // 禁用视锥体剔除：InstancedMesh 的包围球基于单个几何体，
+      // 无法覆盖所有实例的位置，导致缩放/俯视时整体被错误剔除
+      mesh.frustumCulled = false;
     }
   }
 
@@ -615,24 +815,83 @@ export class Renderer {
     return geo;
   }
 
-  /** 🌿 植物：树干 + 有机树冠 */
+  /** 🌿 植物：树干 + 分枝 + 多层树叶簇 */
   private buildPlantGeometry(): THREE.BufferGeometry {
-    // 树干：上细下粗
-    const trunk = new THREE.CylinderGeometry(0.06, 0.10, 0.7, 5);
-    trunk.translate(0, 0.35, 0);
+    const parts: THREE.BufferGeometry[] = [];
 
-    // 树冠：扰动的十二面体
-    const canopy = new THREE.DodecahedronGeometry(0.48, 1);
-    const cPos = canopy.attributes.position;
-    for (let i = 0; i < cPos.count; i++) {
-      const n = 1 + (this.hash2D(i * 17, i * 29) - 0.5) * 0.35;
-      cPos.setXYZ(i, cPos.getX(i) * n, cPos.getY(i) * n, cPos.getZ(i) * n);
+    // ---- 树干：略有弯曲的锥形圆柱 ----
+    const trunk = new THREE.CylinderGeometry(0.05, 0.12, 0.8, 6);
+    // 给树干顶点加一点弯曲
+    const tPos = trunk.attributes.position;
+    for (let i = 0; i < tPos.count; i++) {
+      const y = tPos.getY(i);
+      const bendFactor = (y + 0.4) / 0.8; // 0→底, 1→顶
+      tPos.setX(i, tPos.getX(i) + bendFactor * bendFactor * 0.03);
     }
-    canopy.computeVertexNormals();
-    canopy.translate(0, 0.95, 0);
+    trunk.translate(0, 0.4, 0);
+    parts.push(trunk);
 
-    const merged = mergeGeometries([trunk, canopy]);
-    return merged ?? trunk; // fallback
+    // ---- 主要树枝（3条，从树干上部伸出） ----
+    const branchAngles = [0, Math.PI * 0.7, Math.PI * 1.4];
+    for (let b = 0; b < 3; b++) {
+      const branch = new THREE.CylinderGeometry(0.015, 0.035, 0.35, 4);
+      branch.rotateZ(Math.PI * 0.35); // 倾斜
+      branch.rotateY(branchAngles[b]);
+      branch.translate(
+        Math.sin(branchAngles[b]) * 0.12,
+        0.65 + b * 0.05,
+        Math.cos(branchAngles[b]) * 0.12
+      );
+      parts.push(branch);
+    }
+
+    // ---- 树冠：由多个扰动的球体/十二面体组成的有机叶簇 ----
+    // 主冠（顶部大球）
+    const mainCanopy = new THREE.DodecahedronGeometry(0.38, 1);
+    this.perturbGeometry(mainCanopy, 0.3, 100);
+    mainCanopy.translate(0, 1.05, 0);
+    parts.push(mainCanopy);
+
+    // 侧冠叶簇（围绕主冠排列，让树冠更丰满）
+    const leafClusters = [
+      { x: 0.22, y: 0.88, z: 0.15, r: 0.22 },
+      { x: -0.18, y: 0.92, z: 0.20, r: 0.20 },
+      { x: 0.05, y: 0.82, z: -0.25, r: 0.23 },
+      { x: -0.20, y: 1.00, z: -0.12, r: 0.18 },
+      { x: 0.25, y: 1.05, z: -0.10, r: 0.19 },
+      { x: -0.08, y: 1.18, z: 0.10, r: 0.17 },
+    ];
+    for (let c = 0; c < leafClusters.length; c++) {
+      const lc = leafClusters[c];
+      const cluster = new THREE.DodecahedronGeometry(lc.r, 1);
+      this.perturbGeometry(cluster, 0.25, 200 + c * 37);
+      cluster.translate(lc.x, lc.y, lc.z);
+      parts.push(cluster);
+    }
+
+    // ---- 底部小植被（灌木感） ----
+    const bush = new THREE.SphereGeometry(0.14, 5, 4);
+    this.perturbGeometry(bush, 0.2, 500);
+    bush.translate(0.1, 0.12, 0.08);
+    parts.push(bush);
+
+    const bush2 = new THREE.SphereGeometry(0.12, 5, 4);
+    this.perturbGeometry(bush2, 0.2, 600);
+    bush2.translate(-0.08, 0.10, -0.06);
+    parts.push(bush2);
+
+    const merged = mergeGeometries(parts);
+    return merged ?? parts[0];
+  }
+
+  /** 对几何体顶点施加有机扰动（模拟自然生长的不规则感） */
+  private perturbGeometry(geo: THREE.BufferGeometry, strength: number, seedOffset: number): void {
+    const pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const n = 1 + (this.hash2D(i * 17 + seedOffset, i * 29 + seedOffset) - 0.5) * strength;
+      pos.setXYZ(i, pos.getX(i) * n, pos.getY(i) * n, pos.getZ(i) * n);
+    }
+    geo.computeVertexNormals();
   }
 
   /** 🦗 昆虫：头 + 胸 + 腹 + 翅膀 */
@@ -728,6 +987,71 @@ export class Renderer {
     return merged ?? body;
   }
 
+  /**
+   * 公开方法：创建生命体 3D 预览模型
+   * 根据物种类型和 DNA 生成带颜色和形态变化的 Mesh
+   * 用于详情面板中的 3D 预览
+   */
+  createPreviewMesh(type: OrganismType, dna: number[]): THREE.Mesh {
+    let geometry: THREE.BufferGeometry;
+    switch (type) {
+      case OrganismType.Microbe: geometry = this.buildMicrobeGeometry(); break;
+      case OrganismType.Plant:   geometry = this.buildPlantGeometry();   break;
+      case OrganismType.Insect:  geometry = this.buildInsectGeometry();  break;
+      case OrganismType.Animal:  geometry = this.buildAnimalGeometry();  break;
+    }
+
+    // DNA 驱动颜色
+    const aquatic = dna[Gene.Aquatic] ?? 0;
+    const colorHue = dna[Gene.ColorHue] ?? 0.5;
+    const colorLight = dna[Gene.ColorLightness] ?? 0.5;
+    const bodyShape = dna[Gene.BodyShape] ?? 0.5;
+
+    const color = new THREE.Color();
+    switch (type) {
+      case OrganismType.Microbe: {
+        const hue = 0.45 + colorHue * 0.2 - aquatic * 0.1;
+        color.setHSL(hue, 0.45 + aquatic * 0.25, 0.35 + colorLight * 0.35);
+        break;
+      }
+      case OrganismType.Plant: {
+        const hue = 0.25 + colorHue * 0.15 - aquatic * 0.08;
+        color.setHSL(hue, 0.5 + colorLight * 0.3, 0.3 + colorLight * 0.3);
+        break;
+      }
+      case OrganismType.Insect: {
+        color.setHSL(colorHue, 0.55 + colorLight * 0.3, 0.3 + colorLight * 0.35);
+        if (aquatic > 0.5) color.lerp(this.aquaticBlendColor, aquatic * 0.4);
+        break;
+      }
+      case OrganismType.Animal: {
+        let hue = colorHue * 0.15 + 0.02;
+        let sat = 0.55 + colorLight * 0.25;
+        if (aquatic > 0.5) { hue = 0.55 + colorHue * 0.1; sat = 0.3 + colorLight * 0.2; }
+        color.setHSL(hue, sat, 0.25 + colorLight * 0.3);
+        break;
+      }
+    }
+
+    const material = new THREE.MeshStandardMaterial({
+      color,
+      roughness: 0.5,
+      metalness: 0.1,
+      emissive: color.clone().multiplyScalar(0.15),
+      side: THREE.DoubleSide,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+
+    // 体型形态变形
+    const shapeX = 1 + (0.5 - bodyShape) * 0.35;
+    const shapeZ = 1 + (bodyShape - 0.5) * 0.35;
+    const scaleY = (type === OrganismType.Plant && aquatic > 0.5) ? 0.6 : 1.0;
+    mesh.scale.set(shapeX, scaleY, shapeZ);
+
+    return mesh;
+  }
+
   /** 创建选中高亮环 */
   private createHighlightMesh(): void {
     const ringGeo = new THREE.RingGeometry(1.5, 2.0, 32);
@@ -776,24 +1100,28 @@ export class Renderer {
     const range = p1.time - p0.time;
     const t = range > 0 ? (this.dayTime - p0.time) / range : 0;
 
-    // 天空颜色
-    const skyColor = new THREE.Color(p0.sky).lerp(new THREE.Color(p1.sky), t);
-    const fogColor = new THREE.Color(p0.fog).lerp(new THREE.Color(p1.fog), t);
-    const sunColor = new THREE.Color(p0.sunColor).lerp(new THREE.Color(p1.sunColor), t);
-    const hemiSky = new THREE.Color(p0.hemiSky).lerp(new THREE.Color(p1.hemiSky), t);
-    const hemiGround = new THREE.Color(p0.hemiGround).lerp(new THREE.Color(p1.hemiGround), t);
+    // 天空颜色（使用预分配临时对象避免 GC）
+    const a = this.dnColorA;
+    const b = this.dnColorB;
 
-    // 应用
-    (this.scene.background as THREE.Color).copy(skyColor);
-    (this.scene.fog as THREE.FogExp2).color.copy(fogColor);
+    a.setHex(p0.sky); b.setHex(p1.sky);
+    (this.scene.background as THREE.Color).copy(a.lerp(b, t));
+    const skyColor = this.scene.background as THREE.Color; // 引用，用于后续水面
 
-    this.sunLight.color.copy(sunColor);
+    a.setHex(p0.fog); b.setHex(p1.fog);
+    (this.scene.fog as THREE.FogExp2).color.copy(a.lerp(b, t));
+
+    a.setHex(p0.sunColor); b.setHex(p1.sunColor);
+    this.sunLight.color.copy(a.lerp(b, t));
     this.sunLight.intensity = p0.sunIntensity + (p1.sunIntensity - p0.sunIntensity) * t;
 
     this.ambientLight.intensity = p0.ambientIntensity + (p1.ambientIntensity - p0.ambientIntensity) * t;
 
-    this.hemiLight.color.copy(hemiSky);
-    this.hemiLight.groundColor.copy(hemiGround);
+    a.setHex(p0.hemiSky); b.setHex(p1.hemiSky);
+    this.hemiLight.color.copy(a.lerp(b, t));
+
+    a.setHex(p0.hemiGround); b.setHex(p1.hemiGround);
+    this.hemiLight.groundColor.copy(a.lerp(b, t));
 
     // 太阳轨道（从东方升起，经天顶，从西方落下）
     const sunAngle = this.dayTime * Math.PI * 2 - Math.PI / 2;
@@ -804,9 +1132,9 @@ export class Renderer {
       sunRadius * 0.3
     );
 
-    // 曝光度：夜间不能太暗，保证可见性
+    // 曝光度：夜间保留足够亮度，保证地面可见
     const sunHeight01 = (Math.sin(sunAngle) + 1) / 2; // [0, 1]
-    this.renderer.toneMappingExposure = 0.75 + sunHeight01 * 0.45;
+    this.renderer.toneMappingExposure = 1.0 + sunHeight01 * 0.3;
 
     // 星空透明度：夜间显示，白天隐藏
     let nightness: number;
@@ -821,55 +1149,210 @@ export class Renderer {
     } else {
       nightness = 0;
     }
-    (this.starsMesh.material as THREE.PointsMaterial).opacity = nightness * 0.85;
+    this.nightness = nightness;
+    (this.starsMesh.material as THREE.PointsMaterial).opacity = nightness * 0.9;
 
-    // 生命体夜间辉光：夜晚时自发光使轮廓清晰可见
+    // 星星微闪烁（用 sin 叠加产生随机感）
+    const starFlicker = 1.0 + Math.sin(this.elapsedRunTime * 0.002) * 0.08
+                            + Math.sin(this.elapsedRunTime * 0.0057) * 0.06;
+    (this.starsMesh.material as THREE.PointsMaterial).size = 2.0 * starFlicker;
+
+    // ---- 月亮位置 & 可见性 ----
+    // 月亮与太阳相对：太阳在天时月亮在地平线以下，太阳落下时月亮升起
+    const moonAngle = sunAngle + Math.PI; // 月亮与太阳对称
+    const moonRadius = 500;
+    const moonX = Math.cos(moonAngle) * moonRadius * 0.6;
+    const moonY = Math.sin(moonAngle) * moonRadius * 0.8;
+    const moonZ = moonRadius * 0.4;
+    this.moonGroup.position.set(moonX, moonY, moonZ);
+
+    // 月亮仅在夜间可见（高度 > 0）
+    const moonVisible = nightness > 0.05 && moonY > 0;
+    this.moonGroup.visible = moonVisible;
+    // 月光强度随夜晚程度和月亮高度变化
+    if (moonVisible) {
+      const moonHeight01 = Math.max(0, moonY / (moonRadius * 0.8));
+      this.moonLight.intensity = nightness * moonHeight01 * 0.6;
+      // 月球和光晕透明度
+      const moonMat = (this.moonGroup.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial;
+      moonMat.emissiveIntensity = 0.4 + nightness * 0.6;
+      const glowMat = (this.moonGroup.children[1] as THREE.Mesh).material as THREE.MeshBasicMaterial;
+      glowMat.opacity = nightness * 0.12;
+    }
+
+    // ---- 生命体夜间辉光 ----
     const organismGlow = nightness * 0.45;
     this.microbeMat.emissiveIntensity = organismGlow;
     this.plantMat.emissiveIntensity = organismGlow * 0.7;
-    this.insectMat.emissiveIntensity = organismGlow;
+    // 昆虫：夜行昆虫额外发光（萤火虫效果），通过更高的 emissiveIntensity 实现
+    // 基础辉光 + 额外脉冲闪烁（呼吸灯效果）
+    const insectBaseGlow = organismGlow;
+    const insectBioGlow = nightness * 0.6 * (0.7 + 0.3 * Math.sin(this.elapsedRunTime * 0.003));
+    this.insectMat.emissiveIntensity = insectBaseGlow + insectBioGlow;
     this.animalMat.emissiveIntensity = organismGlow;
+    this.eggMat.emissiveIntensity = organismGlow * 0.5; // 蛋微弱发光
 
-    // 水面颜色随天空变化
+    // 水面颜色随天空变化（使用临时 color 避免 new）
     const waterMat = this.waterMesh.material as THREE.MeshStandardMaterial;
     waterMat.color.copy(skyColor).multiplyScalar(0.25);
-    waterMat.color.add(new THREE.Color(0x0a3050));
+    a.setHex(0x0a3050);
+    waterMat.color.add(a);
 
     // 水面微波（使用累计运行时间，暂停时静止）
-    this.waterMesh.position.y = WATER_LEVEL + Math.sin(this.elapsedRunTime * 0.0008) * 0.12;
+    this.waterMesh.position.y = this.waterLevel + Math.sin(this.elapsedRunTime * 0.0008) * 0.12;
   }
 
   // ================================================================
   //  渲染数据更新
   // ================================================================
 
-  /** 更新生命体渲染数据（生命体贴合地形表面） */
+  /**
+   * 接收 Worker 发来的最新帧数据
+   * 仅存储目标位置并标记颜色需更新，实际矩阵更新在 render() 中通过插值完成
+   */
   updateOrganisms(organisms: OrganismRenderData[]): void {
+    // 将当前目标位置和朝向保存为"上一帧"（用于插值）
+    this.prevPositions.clear();
+    for (const org of this.targetOrganisms) {
+      this.prevPositions.set(org.id, { x: org.x, z: org.z, facing: org.facing });
+    }
+
+    // 存储新的目标数据
+    this.targetOrganisms = organisms;
+    this.lastOrganisms = organisms;
+
+    // 自适应追踪 Worker 帧间隔
+    const now = performance.now();
+    if (this.lastWorkerTime > 0) {
+      this.workerDt = Math.max(10, Math.min(500, now - this.lastWorkerTime));
+    }
+    this.lastWorkerTime = now;
+
+    // 标记颜色需要更新（下次矩阵更新时一并处理）
+    this.needsColorUpdate = true;
+
+    // 如果有选中的生命体，更新高亮位置和数据（运行/暂停时都需要）
+    if (this.selectedOrganism) {
+      this.updateHighlightForSelected(organisms);
+    }
+  }
+
+  /** 接收 Worker 发来的蛋数据 */
+  updateEggs(eggs: EggRenderData[]): void {
+    this.targetEggs = eggs;
+  }
+
+  // ================================================================
+  //  帧间插值（每帧调用，消除运动卡顿）
+  // ================================================================
+
+  /** 计算当前插值系数 [0, 1]，使用 smoothstep 缓动 */
+  private getLerpAlpha(): number {
+    if (this.lastWorkerTime <= 0 || this.workerDt <= 0) return 1;
+    const elapsed = performance.now() - this.lastWorkerTime;
+    const raw = Math.min(elapsed / this.workerDt, 1.0);
+    // smoothstep 缓动：避免线性插值的突兀过渡
+    return raw * raw * (3 - 2 * raw);
+  }
+
+  /** 获取指定生命体的插值位置和朝向 */
+  private getInterpolatedPos(org: OrganismRenderData, alpha: number): { x: number; z: number } {
+    const prev = this.prevPositions.get(org.id);
+    if (prev) {
+      return {
+        x: prev.x + (org.x - prev.x) * alpha,
+        z: prev.z + (org.z - prev.z) * alpha,
+      };
+    }
+    return { x: org.x, z: org.z };
+  }
+
+  /** 获取指定生命体的插值朝向角度（处理 wrap-around） */
+  private getInterpolatedFacing(org: OrganismRenderData, alpha: number): number {
+    const prev = this.prevPositions.get(org.id);
+    if (prev) {
+      let diff = org.facing - prev.facing;
+      // 归一化到 [-PI, PI]，走最短弧
+      if (diff > Math.PI) diff -= Math.PI * 2;
+      if (diff < -Math.PI) diff += Math.PI * 2;
+      return prev.facing + diff * alpha;
+    }
+    return org.facing;
+  }
+
+  /**
+   * 每渲染帧调用：使用插值位置更新所有 InstancedMesh 矩阵
+   * 颜色仅在收到新 Worker 数据时更新（needsColorUpdate）
+   */
+  private updateInstanceMatrices(): void {
+    const organisms = this.targetOrganisms;
+    if (organisms.length === 0) return;
+
+    const alpha = this.getLerpAlpha();
+
     let microbeIdx = 0;
     let plantIdx = 0;
     let insectIdx = 0;
     let animalIdx = 0;
 
-    // 存储最新帧数据（用于暂停时点击选中）
-    this.lastOrganisms = organisms;
-
     for (let i = 0; i < organisms.length; i++) {
       const org = organisms[i];
-      // 获取地形表面高度，确保不沉入水中
-      const terrainY = Math.max(WATER_LEVEL + 0.1, this.getTerrainHeight(org.x, org.z));
+
+      // 插值位置（尸体不需要插值，它们不移动）
+      const pos = org.isCorpse
+        ? { x: org.x, z: org.z }
+        : this.getInterpolatedPos(org, alpha);
+      // 插值朝向（尸体保持死亡时的朝向）
+      const facing = org.isCorpse
+        ? org.facing
+        : this.getInterpolatedFacing(org, alpha);
+
+      const rawTerrainY = this.getTerrainHeight(pos.x, pos.z);
+      // DNA 基因读取
+      const aquatic = org.dna[Gene.Aquatic] ?? 0;
+      const bodyShape = org.dna[Gene.BodyShape] ?? 0.5;
+      const colorHue = org.dna[Gene.ColorHue] ?? 0.5;
+      const colorLight = org.dna[Gene.ColorLightness] ?? 0.5;
+
+      // 水生生物在水面以下时贴水面游动，陆生生物在水面以上
+      let terrainY: number;
+      if (rawTerrainY < this.waterLevel && aquatic > 0.5) {
+        terrainY = this.waterLevel - 0.3;
+      } else {
+        terrainY = Math.max(this.waterLevel + 0.1, rawTerrainY);
+      }
+
+      // 体型形态：紧凑型(0)→宽扁，流线型(1)→修长
+      const shapeX = 1 + (0.5 - bodyShape) * 0.35;
+      const shapeZ = 1 + (bodyShape - 0.5) * 0.35;
+
+      // ---- 尸体视觉修正 ----
+      // 尸体：压扁（倒地），颜色变暗灰
+      const isCorpse = org.isCorpse;
+      const decayDarken = isCorpse ? (1 - org.decayProgress * 0.6) : 1.0;
+      const corpseYScale = isCorpse ? 0.2 : 1.0; // 尸体压扁
+
+      // 模型的头部都朝向 -Z 方向，所以需要加 π 翻转，使头部对齐移动方向
+      const renderFacing = facing + Math.PI;
 
       switch (org.type) {
         case OrganismType.Microbe: {
           if (microbeIdx >= MAX_MICROBES) break;
           const scale = org.size;
-          this.tempMatrix.makeScale(scale, scale, scale);
-          // 有机变形体中心在原点附近，微微抬高离地
-          this.tempMatrix.setPosition(org.x, terrainY + scale * 0.25, org.z);
+          // 微生物大致对称，仍应用旋转以保持一致性
+          this.tempQuat.setFromAxisAngle(this.yAxis, renderFacing);
+          this.tempScaleVec.set(scale * shapeX, scale * corpseYScale, scale * shapeZ);
+          this.tempVec3A.set(pos.x, terrainY + scale * 0.25 * corpseYScale, pos.z);
+          this.tempMatrix.compose(this.tempVec3A, this.tempQuat, this.tempScaleVec);
           this.microbeMesh.setMatrixAt(microbeIdx, this.tempMatrix);
 
-          const hueM = (org.speciesId * 97.32 + 170) % 360;
-          this.tempColor.setHSL(hueM / 360, 0.55, 0.55);
-          this.microbeMesh.setColorAt(microbeIdx, this.tempColor);
+          if (this.needsColorUpdate) {
+            const hue = 0.45 + colorHue * 0.2 - aquatic * 0.1;
+            const sat = isCorpse ? 0.15 : (0.45 + aquatic * 0.25);
+            const light = (0.35 + colorLight * 0.35) * decayDarken;
+            this.tempColor.setHSL(hue, sat, light);
+            this.microbeMesh.setColorAt(microbeIdx, this.tempColor);
+          }
           microbeIdx++;
           break;
         }
@@ -877,14 +1360,21 @@ export class Renderer {
         case OrganismType.Plant: {
           if (plantIdx >= MAX_PLANTS) break;
           const scale = org.size;
-          // 树木底部在 y=0，直接贴地
-          this.tempMatrix.makeScale(scale, scale * 1.3, scale);
-          this.tempMatrix.setPosition(org.x, terrainY, org.z);
+          const plantShapeY = aquatic > 0.5 ? 0.6 : 1.3;
+          // 植物不旋转（用单位四元数），保持固定朝向
+          this.tempQuat.identity();
+          this.tempScaleVec.set(scale * shapeX, scale * plantShapeY * corpseYScale, scale * shapeZ);
+          this.tempVec3A.set(pos.x, terrainY, pos.z);
+          this.tempMatrix.compose(this.tempVec3A, this.tempQuat, this.tempScaleVec);
           this.plantMesh.setMatrixAt(plantIdx, this.tempMatrix);
 
-          const greenIntensity = 0.3 + Math.min(0.7, org.energy / 50);
-          this.tempColor.setRGB(0.15, greenIntensity, 0.1);
-          this.plantMesh.setColorAt(plantIdx, this.tempColor);
+          if (this.needsColorUpdate) {
+            const hue = 0.25 + colorHue * 0.15 - aquatic * 0.08;
+            const sat = isCorpse ? 0.1 : (0.5 + colorLight * 0.3);
+            const light = (0.25 + colorLight * 0.3 + Math.min(0.15, org.energy / 100)) * decayDarken;
+            this.tempColor.setHSL(hue, sat, light);
+            this.plantMesh.setColorAt(plantIdx, this.tempColor);
+          }
           plantIdx++;
           break;
         }
@@ -892,14 +1382,39 @@ export class Renderer {
         case OrganismType.Insect: {
           if (insectIdx >= MAX_INSECTS) break;
           const scale = org.size;
-          // 虫体腹部底部约 y=0.05，整体略抬
-          this.tempMatrix.makeScale(scale, scale, scale);
-          this.tempMatrix.setPosition(org.x, terrainY, org.z);
+          // 组合矩阵：缩放 → Y轴旋转(头部朝前) → 位移
+          this.tempQuat.setFromAxisAngle(this.yAxis, renderFacing);
+          this.tempScaleVec.set(scale * shapeX, scale * corpseYScale, scale * shapeZ);
+          this.tempVec3A.set(pos.x, terrainY, pos.z);
+          this.tempMatrix.compose(this.tempVec3A, this.tempQuat, this.tempScaleVec);
           this.insectMesh.setMatrixAt(insectIdx, this.tempMatrix);
 
-          const hue1 = (org.speciesId * 137.508) % 360;
-          this.tempColor.setHSL(hue1 / 360, 0.7, 0.5);
-          this.insectMesh.setColorAt(insectIdx, this.tempColor);
+          if (this.needsColorUpdate) {
+            const nocturnality = org.dna[Gene.Nocturnality] ?? 0;
+            const hue = colorHue;
+            const sat = isCorpse ? 0.1 : (0.55 + colorLight * 0.3);
+            let light = (0.3 + colorLight * 0.35) * decayDarken;
+
+            // 夜行昆虫发光效果（萤火虫）：nocturnality > 0.5 在夜间颜色偏黄绿且变亮
+            if (!isCorpse && nocturnality > 0.5 && this.nightness > 0.1) {
+              const glowAmount = (nocturnality - 0.5) * 2.0; // [0, 1]
+              const glow = glowAmount * this.nightness * 0.55;
+              light = Math.min(0.95, light + glow);
+              // 颜色偏暖黄绿（萤火虫典型色 hue ≈ 0.18-0.35）
+              this.tempColor.setHSL(
+                0.18 + hue * 0.17,
+                Math.min(1, sat + glow * 0.4),
+                light
+              );
+            } else {
+              this.tempColor.setHSL(hue, sat, light);
+            }
+
+            if (!isCorpse && aquatic > 0.5) {
+              this.tempColor.lerp(this.aquaticBlendColor, aquatic * 0.4);
+            }
+            this.insectMesh.setColorAt(insectIdx, this.tempColor);
+          }
           insectIdx++;
           break;
         }
@@ -907,18 +1422,58 @@ export class Renderer {
         case OrganismType.Animal: {
           if (animalIdx >= MAX_ANIMALS) break;
           const scale = org.size;
-          // 四足动物脚底在 y≈-0.1，整体贴地
-          this.tempMatrix.makeScale(scale, scale, scale);
-          this.tempMatrix.setPosition(org.x, terrainY, org.z);
+          // 尸体侧倒：宽度增加，高度压缩
+          const corpseWidthMod = isCorpse ? 1.3 : 1.0;
+          // 组合矩阵：缩放 → Y轴旋转(头部朝前) → 位移
+          this.tempQuat.setFromAxisAngle(this.yAxis, renderFacing);
+          this.tempScaleVec.set(scale * shapeX * corpseWidthMod, scale * corpseYScale, scale * shapeZ * corpseWidthMod);
+          this.tempVec3A.set(pos.x, terrainY, pos.z);
+          this.tempMatrix.compose(this.tempVec3A, this.tempQuat, this.tempScaleVec);
           this.animalMesh.setMatrixAt(animalIdx, this.tempMatrix);
 
-          const hue2 = (org.speciesId * 97.32 + 30) % 360;
-          this.tempColor.setHSL(hue2 / 360, 0.75, 0.42);
-          this.animalMesh.setColorAt(animalIdx, this.tempColor);
+          if (this.needsColorUpdate) {
+            let hue = colorHue * 0.15 + 0.02;
+            let sat = isCorpse ? 0.08 : (0.55 + colorLight * 0.25);
+            const light = (0.25 + colorLight * 0.3) * decayDarken;
+            if (!isCorpse && aquatic > 0.5) {
+              hue = 0.55 + colorHue * 0.1;
+              sat = 0.3 + colorLight * 0.2;
+            }
+            this.tempColor.setHSL(hue, sat, light);
+            this.animalMesh.setColorAt(animalIdx, this.tempColor);
+          }
           animalIdx++;
           break;
         }
       }
+    }
+
+    // ---- 蛋的实例矩阵更新 ----
+    let eggIdx = 0;
+    const eggs = this.targetEggs;
+    for (let i = 0; i < eggs.length && eggIdx < MAX_EGGS; i++) {
+      const egg = eggs[i];
+      const rawY = this.getTerrainHeight(egg.x, egg.z);
+      const terrainY = Math.max(this.waterLevel + 0.1, rawY);
+      const eggSize = egg.size;
+
+      // 蛋的缩放：随孵化进度微微膨胀
+      const hatchSwell = 1 + egg.hatchProgress * 0.15;
+      this.tempScaleVec.set(eggSize * hatchSwell, eggSize * hatchSwell * 1.3, eggSize * hatchSwell);
+
+      this.tempQuat.identity(); // 蛋不旋转
+      this.tempVec3A.set(egg.x, terrainY + eggSize * 0.4, egg.z);
+      this.tempMatrix.compose(this.tempVec3A, this.tempQuat, this.tempScaleVec);
+      this.eggMesh.setMatrixAt(eggIdx, this.tempMatrix);
+
+      if (this.needsColorUpdate) {
+        // 蛋的颜色：基于亲本 DNA 色相，偏暖色调
+        const eggHue = (egg.dna[Gene.ColorHue] ?? 0.12) * 0.15 + 0.06;
+        const eggLight = 0.65 + (egg.dna[Gene.ColorLightness] ?? 0.5) * 0.2;
+        this.tempColor.setHSL(eggHue, 0.35, eggLight);
+        this.eggMesh.setColorAt(eggIdx, this.tempColor);
+      }
+      eggIdx++;
     }
 
     // 更新实例数
@@ -926,17 +1481,25 @@ export class Renderer {
     this.plantMesh.count = plantIdx;
     this.insectMesh.count = insectIdx;
     this.animalMesh.count = animalIdx;
+    this.eggMesh.count = eggIdx;
 
-    // 标记需要更新
-    const meshes = [this.microbeMesh, this.plantMesh, this.insectMesh, this.animalMesh];
+    // 标记 GPU 需要重新上传
+    const meshes = [this.microbeMesh, this.plantMesh, this.insectMesh, this.animalMesh, this.eggMesh];
     for (const mesh of meshes) {
       mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      if (this.needsColorUpdate && mesh.instanceColor) {
+        mesh.instanceColor.needsUpdate = true;
+      }
     }
+    this.needsColorUpdate = false;
 
-    // 如果有选中的生命体，更新高亮位置和数据（运行/暂停时都需要）
-    if (this.selectedOrganism) {
-      this.updateHighlightForSelected(organisms);
+    // 更新选中高亮位置（使用插值坐标）
+    if (this.selectedOrganism && this.highlightMesh.visible) {
+      const selPos = this.getInterpolatedPos(this.selectedOrganism, alpha);
+      const selTerrainY = Math.max(this.waterLevel + 0.1, this.getTerrainHeight(selPos.x, selPos.z));
+      const ringScale = this.selectedOrganism.size * 2.5;
+      this.highlightMesh.scale.set(ringScale, ringScale, ringScale);
+      this.highlightMesh.position.set(selPos.x, selTerrainY + 0.3, selPos.z);
     }
   }
 
@@ -957,6 +1520,9 @@ export class Renderer {
 
     // 更新昼夜交替
     this.updateDayNight();
+
+    // ★ 每帧使用插值位置更新所有生命体矩阵（消除卡顿）
+    this.updateInstanceMatrices();
 
     // 选中高亮脉冲动画
     if (this.highlightMesh.visible) {
@@ -999,7 +1565,7 @@ export class Renderer {
     if (!this.selectedOrganism) return;
 
     const org = this.selectedOrganism;
-    const terrainY = Math.max(WATER_LEVEL + 0.1, this.getTerrainHeight(org.x, org.z));
+    const terrainY = Math.max(this.waterLevel + 0.1, this.getTerrainHeight(org.x, org.z));
 
     // 记录动画起点
     this.focusFrom.copy(this.cameraTarget);
@@ -1038,16 +1604,20 @@ export class Renderer {
     this.updateCameraPosition();
   }
 
-  /** 每帧更新相机跟随（平滑跟踪选中的生命体） */
+  /** 每帧更新相机跟随（平滑跟踪选中的生命体，使用插值位置） */
   private updateFollowCamera(): void {
     if (!this.isFollowing || !this.selectedOrganism || this.focusAnimating) return;
 
     const org = this.selectedOrganism;
-    const terrainY = Math.max(WATER_LEVEL + 0.1, this.getTerrainHeight(org.x, org.z));
-    const targetPos = new THREE.Vector3(org.x, terrainY + org.size * 0.5, org.z);
+    // 使用插值位置而非原始位置，确保相机跟随也平滑
+    const alpha = this.getLerpAlpha();
+    const pos = this.getInterpolatedPos(org, alpha);
+    const terrainY = Math.max(this.waterLevel + 0.1, this.getTerrainHeight(pos.x, pos.z));
+    // 复用临时向量，避免每帧 new
+    this.tempVec3A.set(pos.x, terrainY + org.size * 0.5, pos.z);
 
     // 平滑插值跟随，lerp 系数越小越平滑
-    this.cameraTarget.lerp(targetPos, 0.06);
+    this.cameraTarget.lerp(this.tempVec3A, 0.08);
     this.updateCameraPosition();
   }
 
@@ -1065,29 +1635,22 @@ export class Renderer {
       this.isFollowing = false;
     }
 
-    // 根据相机朝向计算前/右方向（在 XZ 平面上）
-    const forward = new THREE.Vector3(
-      -Math.sin(this.cameraAzimuth),
-      0,
-      -Math.cos(this.cameraAzimuth)
-    );
-    const right = new THREE.Vector3(
-      Math.cos(this.cameraAzimuth),
-      0,
-      -Math.sin(this.cameraAzimuth)
-    );
+    // 根据相机朝向计算前/右方向（在 XZ 平面上），复用临时向量
+    const sinAz = Math.sin(this.cameraAzimuth);
+    const cosAz = Math.cos(this.cameraAzimuth);
 
     // 速度与相机距离成正比（越远移动越快）
     const speed = this.MOVE_SPEED * (this.cameraDistance / 200);
-    const move = new THREE.Vector3();
+    let mx = 0, mz = 0;
 
-    if (this.keysPressed.has('w') || this.keysPressed.has('arrowup'))    move.add(forward.clone().multiplyScalar(speed));
-    if (this.keysPressed.has('s') || this.keysPressed.has('arrowdown'))  move.add(forward.clone().multiplyScalar(-speed));
-    if (this.keysPressed.has('a') || this.keysPressed.has('arrowleft'))  move.add(right.clone().multiplyScalar(-speed));
-    if (this.keysPressed.has('d') || this.keysPressed.has('arrowright')) move.add(right.clone().multiplyScalar(speed));
+    if (this.keysPressed.has('w') || this.keysPressed.has('arrowup'))    { mx += -sinAz * speed; mz += -cosAz * speed; }
+    if (this.keysPressed.has('s') || this.keysPressed.has('arrowdown'))  { mx +=  sinAz * speed; mz +=  cosAz * speed; }
+    if (this.keysPressed.has('a') || this.keysPressed.has('arrowleft'))  { mx += -cosAz * speed; mz +=  sinAz * speed; }
+    if (this.keysPressed.has('d') || this.keysPressed.has('arrowright')) { mx +=  cosAz * speed; mz += -sinAz * speed; }
 
-    if (move.lengthSq() > 0) {
-      this.cameraTarget.add(move);
+    if (mx !== 0 || mz !== 0) {
+      this.cameraTarget.x += mx;
+      this.cameraTarget.z += mz;
       this.updateCameraPosition();
     }
   }
@@ -1097,20 +1660,12 @@ export class Renderer {
     // 平移速度与相机距离成正比
     const panScale = this.cameraDistance * 0.002;
 
-    // 在 XZ 平面上的右方向和前方向
-    const right = new THREE.Vector3(
-      Math.cos(this.cameraAzimuth),
-      0,
-      -Math.sin(this.cameraAzimuth)
-    );
-    const forward = new THREE.Vector3(
-      -Math.sin(this.cameraAzimuth),
-      0,
-      -Math.cos(this.cameraAzimuth)
-    );
+    // 在 XZ 平面上的右方向和前方向（纯数学，避免对象分配）
+    const sinAz = Math.sin(this.cameraAzimuth);
+    const cosAz = Math.cos(this.cameraAzimuth);
 
-    this.cameraTarget.add(right.multiplyScalar(-dx * panScale));
-    this.cameraTarget.add(forward.multiplyScalar(dy * panScale));
+    this.cameraTarget.x += -cosAz * (-dx * panScale) + sinAz * (dy * panScale);
+    this.cameraTarget.z +=  sinAz * (-dx * panScale) + cosAz * (dy * panScale);
     this.updateCameraPosition();
   }
 
@@ -1339,7 +1894,7 @@ export class Renderer {
 
     for (const org of this.lastOrganisms) {
       // 计算生命体的实际渲染 Y 坐标（与 updateOrganisms 一致）
-      const terrainY = Math.max(WATER_LEVEL + 0.1, this.getTerrainHeight(org.x, org.z));
+      const terrainY = Math.max(this.waterLevel + 0.1, this.getTerrainHeight(org.x, org.z));
       projPos.set(org.x, terrainY + org.size * 0.5, org.z);
 
       // 投影到 NDC [-1, 1]
@@ -1367,7 +1922,7 @@ export class Renderer {
 
     if (closest) {
       this.selectedOrganism = closest;
-      this.isFollowing = true;  // 选中后开始跟随
+      this.isFollowing = !closest.isCorpse;  // 尸体不跟随
       this.positionHighlight(closest);
       this.highlightMesh.visible = true;
       this.onOrganismSelect?.(closest);
@@ -1378,7 +1933,7 @@ export class Renderer {
 
   /** 将高亮环定位到指定生命体位置 */
   private positionHighlight(org: OrganismRenderData): void {
-    const terrainY = Math.max(WATER_LEVEL + 0.1, this.getTerrainHeight(org.x, org.z));
+    const terrainY = Math.max(this.waterLevel + 0.1, this.getTerrainHeight(org.x, org.z));
     const ringScale = org.size * 2.5;
     this.highlightMesh.scale.set(ringScale, ringScale, ringScale);
     this.highlightMesh.position.set(org.x, terrainY + 0.3, org.z);

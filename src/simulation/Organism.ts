@@ -2,7 +2,7 @@
 // 生命体 Organism
 // ============================================
 
-import { Gene, OrganismType, OrganismData, Vec3, DeathCause } from '../types';
+import { Gene, OrganismType, OrganismData, Vec3, DeathCause, Gender, BASE_TPS, SeededRandom } from '../types';
 
 let nextId = 1;
 
@@ -37,6 +37,12 @@ export class Organism {
   /** 大气 CO₂ 浓度（由 World 每 tick 更新） */
   co2Level: number;
 
+  /** 大气 O₂ 浓度（由 World 每 tick 更新） */
+  o2Level: number;
+
+  /** 有害气体浓度（由 World 每 tick 更新） */
+  toxicGasLevel: number;
+
   /**
    * 当前活跃度 [0.15, 1.0]（由 World 每 tick 根据昼夜和夜行性计算）
    * - 昼行动物白天 → 1.0，夜间 → 0.15
@@ -44,7 +50,61 @@ export class Organism {
    */
   activityLevel: number;
 
-  constructor(type: OrganismType, dna: number[], position: Vec3) {
+  /** 是否处于水域中（由 World 每 tick 更新） */
+  isInWater: boolean;
+
+  /** 当前位置的水深度 [0, 1]（由 World 每 tick 更新） */
+  waterDepth: number;
+
+  // ---- 性别与繁殖 ----
+  /** 性别（微生物/植物无性别） */
+  gender: Gender;
+
+  /**
+   * 饱腹度 [0, 1]
+   * 0 = 空腹/饥饿，1 = 完全饱腹
+   * 饱腹时不会进食
+   */
+  satiety: number;
+
+  /**
+   * 发情期剩余 tick 数
+   * >0 时处于发情期（仅雌性动物/昆虫有效）
+   */
+  estrusRemaining: number;
+
+  /**
+   * 发情期冷却 tick 数
+   * 发情期结束后需要冷却一段时间才能再次进入发情
+   */
+  estrusCooldown: number;
+
+  /**
+   * 是否已受精（仅雌性）
+   * 受精后会在一段时间后产下后代
+   */
+  isFertilized: boolean;
+
+  /** 受精后妊娠计时器 */
+  gestationTimer: number;
+
+  /**
+   * 朝向角度（弧度）：生命体面朝的方向
+   * 使用 atan2(vx, vz) 约定，0 = +Z 方向，PI/2 = +X 方向
+   * 在移动时平滑插值到速度方向
+   */
+  facing: number;
+
+  /**
+   * 进食计时器（捕食成功后原地进食）
+   * >0 时表示正在进食中，不会移动或执行其他行为
+   * 单位为归一化 tick（乘以 dt 递减）
+   */
+  feedingTimer: number;
+
+  constructor(type: OrganismType, dna: number[], position: Vec3, rng?: SeededRandom) {
+    const r = rng ? () => rng.next() : Math.random;
+
     this.id = nextId++;
     this.type = type;
     this.dna = dna;
@@ -62,7 +122,33 @@ export class Organism {
     this.speciesDominance = 0;
     this.health = 1.0;
     this.co2Level = 1.0;
+    this.o2Level = 1.0;
+    this.toxicGasLevel = 0;
     this.activityLevel = 1.0;
+    this.isInWater = false;
+    this.waterDepth = 0;
+
+    // 性别：微生物和植物无性别，昆虫/动物随机
+    if (type === OrganismType.Microbe || type === OrganismType.Plant) {
+      this.gender = Gender.None;
+    } else {
+      this.gender = r() < 0.5 ? Gender.Female : Gender.Male;
+    }
+
+    this.satiety = 0.6; // 初始中等饱腹
+    this.estrusRemaining = 0;
+    // 初始发情冷却随机错开，避免所有雌性同时进入发情期
+    this.estrusCooldown = type === OrganismType.Animal
+      ? 100 + Math.floor(r() * 400)
+      : 50 + Math.floor(r() * 150);
+    this.isFertilized = false;
+    this.gestationTimer = 0;
+
+    // 随机初始朝向
+    this.facing = r() * Math.PI * 2;
+
+    // 进食计时器（非进食状态）
+    this.feedingTimer = 0;
   }
 
   private getInitialEnergy(): number {
@@ -78,23 +164,28 @@ export class Organism {
 
   private calculateMaxAge(): number {
     // 寿命层级：微生物 < 昆虫 < 动物 < 植物
-    // 一个昼夜循环 ≈ 5400 tick（180秒 × 30TPS）
-    // 微生物：活几分钟（高繁殖率弥补短寿命）
-    // 昆虫：活约半天到一天
-    // 动物：活数天（K-策略，长寿低繁殖）
-    // 植物：活最久（被动生存策略）
-    const baseAge = this.type === OrganismType.Microbe ? 2500 :   // ~83s（高周转率）
-                    this.type === OrganismType.Plant ? 28000 :     // ~933s ≈ 15min
-                    this.type === OrganismType.Insect ? 5000 :     // ~167s（短世代）
-                                                       20000;     // ~667s ≈ 11min（动物）
-    // 体型越大寿命越长（大象比老鼠长寿），代谢越高寿命越短
+    // 基准值以 BASE_TPS=3 为准，实际 TPS 会在 World.constructor 中设置
+    // 此处无法获取 TPS，所以在 World 初始化时通过 scaleTimers() 统一缩放
+    const baseAge = this.type === OrganismType.Microbe ? 2500 :
+                    this.type === OrganismType.Plant ? 28000 :
+                    this.type === OrganismType.Insect ? 5000 :
+                                                       20000;
     const sizeBonus = this.dna[Gene.BodySize] * 2000;
     const metabolismPenalty = this.dna[Gene.Metabolism] * 2500;
-    // 各物种最低寿命保底
     const minAge = this.type === OrganismType.Microbe ? 800 :
                    this.type === OrganismType.Plant ? 5000 :
                    this.type === OrganismType.Insect ? 1500 : 5000;
     return Math.max(minAge, Math.floor(baseAge + sizeBonus - metabolismPenalty));
+  }
+
+  /**
+   * 按 TPS 缩放所有 tick 计数器类型的持续时间
+   * 在 World 初始化完成后调用一次
+   * @param tpsRatio 实际 TPS / BASE_TPS（如 10/3 ≈ 3.33）
+   */
+  scaleTimers(tpsRatio: number): void {
+    this.maxAge = Math.floor(this.maxAge * tpsRatio);
+    this.estrusCooldown = Math.floor(this.estrusCooldown * tpsRatio);
   }
 
   /** 获取体型 */
@@ -102,9 +193,12 @@ export class Organism {
     return this.dna[Gene.BodySize];
   }
 
-  /** 获取移动速度 */
+  /** 获取移动速度（流线型体型有速度加成） */
   get speed(): number {
-    return this.dna[Gene.MoveSpeed];
+    const base = this.dna[Gene.MoveSpeed];
+    // 流线型 (bodyShape→1) 最多 +0.5 速度
+    const shapeBonus = (this.dna[Gene.BodyShape] ?? 0.5) * 0.5;
+    return base + shapeBonus;
   }
 
   /** 获取感知范围 */
@@ -117,9 +211,12 @@ export class Organism {
     return this.dna[Gene.Attack];
   }
 
-  /** 获取防御力 */
+  /** 获取防御力（紧凑型体型有防御加成） */
   get defense(): number {
-    return this.dna[Gene.Defense];
+    const base = this.dna[Gene.Defense];
+    // 紧凑型 (bodyShape→0) 最多 +1.0 防御
+    const shapeBonus = (1 - (this.dna[Gene.BodyShape] ?? 0.5)) * 1.0;
+    return base + shapeBonus;
   }
 
   /** 获取代谢率 */
@@ -152,6 +249,26 @@ export class Organism {
     return this.dna[Gene.Nocturnality] ?? 0;
   }
 
+  /** 获取水生适应性 [0=纯陆生, 1=纯水生] */
+  get aquatic(): number {
+    return this.dna[Gene.Aquatic] ?? 0;
+  }
+
+  /** 获取体型形态 [0=圆润紧凑, 1=流线修长] */
+  get bodyShape(): number {
+    return this.dna[Gene.BodyShape] ?? 0.5;
+  }
+
+  /** 获取体色色相 [0, 1] */
+  get colorHue(): number {
+    return this.dna[Gene.ColorHue] ?? 0.5;
+  }
+
+  /** 获取体色明度 [0=深色, 1=亮色] */
+  get colorLightness(): number {
+    return this.dna[Gene.ColorLightness] ?? 0.5;
+  }
+
   /** 每 tick 的基础能量消耗（按物种差异化） */
   get energyCost(): number {
     // 物种代谢倍率：微生物和植物消耗极低，动物消耗最高
@@ -169,7 +286,21 @@ export class Organism {
     const rawCost = baseCost + sizeCost + speedCost;
     // 休息时（活跃度低）能量消耗降低（类似睡眠节能）
     const activityMod = 0.4 + 0.6 * this.activityLevel;
-    return rawCost * activityMod;
+
+    // 水陆适应性修正：
+    // 水生生物在水中消耗低（aquatic=1 → 0.6×），在陆地消耗高（aquatic=1 → 1.4×）
+    // 陆生生物在水中消耗高（aquatic=0 → 1.5×），在陆地正常（aquatic=0 → 1.0×）
+    let terrainMod = 1.0;
+    if (this.isInWater) {
+      terrainMod = 1.5 - this.aquatic * 0.9; // aquatic=1 → 0.6, aquatic=0 → 1.5
+    } else {
+      terrainMod = 1.0 + this.aquatic * 0.4;  // aquatic=1 → 1.4, aquatic=0 → 1.0
+    }
+
+    // 怀孕能量消耗增加（需要额外营养供给胎儿/蛋）
+    const pregnancyMod = this.isPregnant ? 1.3 : 1.0;
+
+    return rawCost * activityMod * terrainMod * pregnancyMod;
   }
 
   /**
@@ -182,110 +313,242 @@ export class Organism {
     this.causeOfDeath = cause;
   }
 
-  /** 消耗能量并老化，检测多种死亡条件 */
-  tick(): void {
+  /** 获取发情期周期长度（多少 tick 进入一次发情） */
+  get estrusCyclePeriod(): number {
+    return this.type === OrganismType.Animal ? 500 : 200;
+  }
+
+  /** 获取发情期持续时间 */
+  get estrusDuration(): number {
+    return this.type === OrganismType.Animal ? 100 : 60;
+  }
+
+  /** 获取妊娠期长度（哺乳动物长于昆虫） */
+  get gestationPeriod(): number {
+    return this.type === OrganismType.Animal ? 200 : 80;
+  }
+
+  /** 是否处于发情期 */
+  get isInEstrus(): boolean {
+    return this.gender === Gender.Female && this.estrusRemaining > 0;
+  }
+
+  /**
+   * 是否正在释放交配信号（信息素/求偶鸣叫/发光等）
+   * - 雌性发情期 → 释放信息素
+   * - 雄性在繁殖就绪时 → 释放求偶信号
+   */
+  get isEmittingMatingSignal(): boolean {
+    if (this.gender === Gender.Female) {
+      return this.estrusRemaining > 0 && !this.isFertilized;
+    }
+    if (this.gender === Gender.Male) {
+      return this.canMate();
+    }
+    return false;
+  }
+
+  /**
+   * 交配信号传播范围（信息素扩散距离）
+   * 比普通感知范围大 2 倍，模拟气味/声音的远距离传播
+   */
+  get matingSignalRange(): number {
+    return this.senseRange * 2.0;
+  }
+
+  /** 是否处于怀孕/妊娠状态 */
+  get isPregnant(): boolean {
+    return this.gender === Gender.Female && this.isFertilized && this.gestationTimer > 0;
+  }
+
+  /**
+   * 怀孕进度 [0, 1]
+   * 0 = 刚受精, 1 = 即将分娩/产卵
+   */
+  get pregnancyProgress(): number {
+    if (!this.isPregnant) return 0;
+    const totalGestation = this.gestationPeriod;
+    // gestationTimer 从 gestationPeriod*tpsRatio 递减到 0
+    // 计算进度: 1 - (remaining / total_scaled)
+    // 由于 totalGestation 是未缩放值，而 gestationTimer 已经缩放了
+    // 需要使用 _gestationMax 记录初始值
+    if ((this as any)._gestationMax) {
+      return 1 - this.gestationTimer / (this as any)._gestationMax;
+    }
+    return 0;
+  }
+
+  /** 是否饱腹（不需要进食） */
+  get isFull(): boolean {
+    return this.satiety > 0.85;
+  }
+
+  /** 是否正在原地进食猎物 */
+  get isFeeding(): boolean {
+    return this.feedingTimer > 0;
+  }
+
+  /** 饱腹容量（基于体型） */
+  get stomachCapacity(): number {
+    return this.size * 30;
+  }
+
+  /**
+   * 消耗能量并老化，检测多种死亡条件
+   * @param dt 时间步长归一化因子（BASE_TPS / 实际TPS），连续效果需乘以此值
+   */
+  tick(dt: number = 1): void {
     if (!this.alive) return;
 
     this.age++;
-    this.energy -= this.energyCost;
+    this.energy -= this.energyCost * dt;
 
     if (this.reproductionCooldown > 0) {
       this.reproductionCooldown--;
     }
 
-    // 微生物通过分解/吸收从环境获取能量
-    // 微生物代谢极低，但能从环境中持续获取少量能量
-    if (this.type === OrganismType.Microbe) {
-      const densityFactor = Math.max(0.1, 1 - this.localDensity * 0.5);
-      this.energy += (0.06 + this.metabolism * 0.08) * densityFactor;
+    // ---- 进食计时器递减 ----
+    if (this.feedingTimer > 0) {
+      this.feedingTimer -= dt;
+      if (this.feedingTimer < 0) this.feedingTimer = 0;
     }
 
-    // 植物通过光合作用获取能量
-    // 核心机制：光合作用需要 CO₂，当 CO₂ 不足时植物无法获取能量
-    // CO₂ 来自动物/昆虫/微生物的呼吸，所以其他生物灭绝 → 植物也会死
+    // ---- 饱腹度衰减（乘 dt 归一化） ----
+    const satietyDecay = (this.metabolism * 0.003 + 0.001) * dt;
+    this.satiety = Math.max(0, this.satiety - satietyDecay);
+
+    // ---- 发情期周期（仅雌性动物/昆虫） ----
+    if (this.gender === Gender.Female &&
+        (this.type === OrganismType.Animal || this.type === OrganismType.Insect)) {
+      if (this.estrusRemaining > 0) {
+        this.estrusRemaining--;
+      } else if (this.estrusCooldown > 0) {
+        this.estrusCooldown--;
+      } else if (this.health > 0.5 && this.energy > this.reproThreshold * 0.5) {
+        // 进入发情期（需要健康和一定能量）
+        // 持续时间按 tpsRatio 缩放
+        const tpsRatio = 1 / dt;
+        this.estrusRemaining = Math.floor(this.estrusDuration * tpsRatio);
+        this.estrusCooldown = Math.floor(this.estrusCyclePeriod * tpsRatio);
+      }
+
+      // 妊娠计时
+      if (this.isFertilized) {
+        this.gestationTimer--;
+        if (this.gestationTimer <= 0) {
+          this.isFertilized = false;
+        }
+      }
+    }
+
+    // 微生物通过分解/吸收从环境获取能量（乘 dt 归一化）
+    if (this.type === OrganismType.Microbe) {
+      const densityFactor = Math.max(0.1, 1 - this.localDensity * 0.5);
+      this.energy += (0.06 + this.metabolism * 0.08) * densityFactor * dt;
+    }
+
+    // 植物通过光合作用获取能量（乘 dt 归一化）
     if (this.type === OrganismType.Plant) {
       const densityFactor = Math.max(0.2, 1 - this.localDensity * 0.3);
       const co2Factor = Math.min(1.3, this.co2Level);
-      this.energy += (0.1 + this.size * 0.06) * densityFactor * co2Factor;
+      const o2Inhibition = this.o2Level > 1.5
+        ? Math.max(0.3, 1 - (this.o2Level - 1.5) * 0.4)
+        : 1.0;
+      this.energy += (0.1 + this.size * 0.06) * densityFactor * co2Factor * o2Inhibition * dt;
     }
 
     // ---- 多因素死亡检测 ----
 
-    // 1. 饿死：能量耗尽
+    // 1. 饿死
     if (this.energy <= 0) {
       this.die(DeathCause.Starvation);
       return;
     }
 
-    // 2. 自然老死：达到最大年龄
+    // 2. 自然老死
     if (this.age >= this.maxAge) {
       this.die(DeathCause.OldAge);
       return;
     }
 
-    // 3. 生命游戏规则：同物种邻居过密致死
-    //    借鉴 Conway's Game of Life：
-    //    - 邻居太少 → 孤立（不直接致死，但无法繁殖）
-    //    - 邻居适中 → 存活（理想范围）
-    //    - 邻居过多 → 资源竞争导致死亡
-    //    当物种多样性低（单一物种垄断）时，过密阈值更低、压力更大
+    // 3. 过密致死
     {
-      // 基础过密阈值（邻居数量）
-      // 微生物能容忍最高密度（群体生存），动物最低（领地性强）
       const baseOverpopThreshold = this.type === OrganismType.Microbe ? 30 :
                                     this.type === OrganismType.Plant ? 18 :
                                     this.type === OrganismType.Insect ? 12 : 5;
-
-      // 单一物种垄断时，过密阈值降低（资源全被同一物种占据）
-      // speciesDominance 越高 → 阈值越低 → 越容易触发过密致死
       const dominancePenalty = this.speciesDominance * this.speciesDominance;
       const effectiveThreshold = baseOverpopThreshold * (1 - dominancePenalty * 0.5);
 
       if (this.sameSpeciesNeighbors > effectiveThreshold) {
-        // 超出阈值的程度
         const excess = (this.sameSpeciesNeighbors - effectiveThreshold) / effectiveThreshold;
-
-        // 过密导致能量加速消耗（资源竞争）
-        const competitionCost = excess * (1 + this.speciesDominance) * 0.2;
+        const competitionCost = excess * (1 + this.speciesDominance) * 0.2 * dt;
         this.energy -= competitionCost;
-        this.health -= excess * 0.008 * (1 + this.speciesDominance);
+        this.health -= excess * 0.008 * (1 + this.speciesDominance) * dt;
 
-        // 极度拥挤 → 直接概率性死亡（类似生命游戏的 overpopulation）
-        const overpopDeathChance = excess * 0.005 * (1 + this.speciesDominance * 2);
+        const overpopDeathChance = excess * 0.005 * (1 + this.speciesDominance * 2) * dt;
         if (Math.random() < overpopDeathChance) {
           this.die(DeathCause.Overcrowding);
           return;
         }
-
-        // 健康值耗尽也会过密致死
         if (this.health <= 0) {
           this.die(DeathCause.Overcrowding);
           return;
         }
       } else if (this.localDensity < 0.3) {
-        // 低密度时健康缓慢恢复
-        this.health = Math.min(1.0, this.health + 0.002);
+        this.health = Math.min(1.0, this.health + 0.002 * dt);
       } else {
-        // 中等密度时健康微弱恢复
-        this.health = Math.min(1.0, this.health + 0.001);
+        this.health = Math.min(1.0, this.health + 0.001 * dt);
       }
     }
 
     // 4. 疾病
-    //    高密度 + 低健康 + 物种垄断 = 疾病爆发风险升高
     if (this.localDensity > 0.4 && this.health < 0.5) {
       const diseaseChance = (1 - this.health) * this.localDensity
-                            * (1 + this.speciesDominance) * 0.001;
+                            * (1 + this.speciesDominance) * 0.001 * dt;
       if (Math.random() < diseaseChance) {
         this.die(DeathCause.Disease);
         return;
       }
     }
 
-    // 5. 年老体衰：接近最大年龄时，随机死亡概率上升
+    // 5a. 缺氧（乘 dt）
+    if (this.type !== OrganismType.Plant && this.o2Level < 0.5) {
+      const suffocateRate = (0.5 - this.o2Level) * 0.02 * dt;
+      this.health -= suffocateRate;
+      this.energy -= suffocateRate * 1.5;
+      if (this.health <= 0) {
+        this.die(DeathCause.Environmental);
+        return;
+      }
+    }
+
+    // 5b. 有害气体中毒（乘 dt）
+    if (this.toxicGasLevel > 0.3) {
+      const toxicSensitivity = this.type === OrganismType.Plant ? 0.3 : 1.0;
+      const toxicDamage = (this.toxicGasLevel - 0.3) * 0.008 * toxicSensitivity * dt;
+      this.health -= toxicDamage;
+      this.energy -= toxicDamage * 0.5;
+      if (this.health <= 0) {
+        this.die(DeathCause.Environmental);
+        return;
+      }
+    }
+
+    // 5c. 溺水（乘 dt）
+    if (this.isInWater && this.aquatic < 0.4) {
+      const drownRate = (1 - this.aquatic) * this.waterDepth * 0.015 * dt;
+      this.health -= drownRate;
+      this.energy -= drownRate * 2;
+      if (this.health <= 0) {
+        this.die(DeathCause.Environmental);
+        return;
+      }
+    }
+
+    // 6. 年老体衰（概率乘 dt）
     const ageRatio = this.age / this.maxAge;
     if (ageRatio > 0.8) {
-      const elderlyDeathChance = (ageRatio - 0.8) * 0.003;
+      const elderlyDeathChance = (ageRatio - 0.8) * 0.003 * dt;
       if (Math.random() < elderlyDeathChance) {
         this.die(DeathCause.OldAge);
         return;
@@ -293,23 +556,65 @@ export class Organism {
     }
   }
 
-  /** 是否可以繁殖 */
+  /**
+   * 是否可以繁殖
+   * - 微生物/植物：无性繁殖，只需能量和年龄
+   * - 昆虫/动物雌性：需要处于发情期或已受精且妊娠完成
+   * - 昆虫/动物雄性：不直接繁殖，而是"受精"雌性
+   */
   canReproduce(): boolean {
     // 各物种达到性成熟的最低年龄不同
-    // 微生物：几乎立刻可以分裂（r-策略）
-    // 动物：需要较长时间发育到成年（K-策略）
     let minAge: number;
     switch (this.type) {
-      case OrganismType.Microbe: minAge = 30;  break; // 极快成熟
-      case OrganismType.Plant:   minAge = 80;  break; // 较快
-      case OrganismType.Insect:  minAge = 60;  break; // 中等
-      case OrganismType.Animal:  minAge = 400; break; // 慢成熟
+      case OrganismType.Microbe: minAge = 30;  break;
+      case OrganismType.Plant:   minAge = 80;  break;
+      case OrganismType.Insect:  minAge = 60;  break;
+      case OrganismType.Animal:  minAge = 400; break;
     }
-    return this.alive &&
+
+    const baseCondition = this.alive &&
            this.energy >= this.reproThreshold &&
            this.reproductionCooldown <= 0 &&
            this.age > minAge &&
            this.health > 0.3;
+
+    if (!baseCondition) return false;
+
+    // 微生物/植物无性繁殖 → 直接满足
+    if (this.gender === Gender.None) return true;
+
+    // 有性别的物种
+    if (this.gender === Gender.Female) {
+      // 雌性：必须已受精且妊娠完成
+      return !this.isFertilized && this.gestationTimer <= 0;
+    }
+
+    // 雄性不直接"繁殖"，而是参与受精
+    return false;
+  }
+
+  /**
+   * 雄性是否可以参与交配（受精雌性）
+   */
+  canMate(): boolean {
+    let minAge: number;
+    switch (this.type) {
+      case OrganismType.Insect:  minAge = 60;  break;
+      case OrganismType.Animal:  minAge = 400; break;
+      default: return false;
+    }
+    return this.alive &&
+           this.gender === Gender.Male &&
+           this.energy >= this.reproThreshold * 0.4 &&
+           this.reproductionCooldown <= 0 &&
+           this.age > minAge &&
+           this.health > 0.3;
+  }
+
+  /** 进食增加饱腹度 */
+  feed(foodEnergy: number): void {
+    const satietyGain = foodEnergy / this.stomachCapacity;
+    this.satiety = Math.min(1.0, this.satiety + satietyGain);
   }
 
   /** 序列化为可传输数据 */

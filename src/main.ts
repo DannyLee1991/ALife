@@ -3,6 +3,7 @@
 // 串联 WebWorker 模拟层和 Three.js 渲染层
 // ============================================
 
+import * as THREE from 'three';
 import { Renderer } from './renderer/Renderer';
 import {
   WorkerMessageType,
@@ -12,8 +13,10 @@ import {
   OrganismRenderData,
   OrganismType,
   Gene,
+  Gender,
   GENE_RANGES,
   getSubSpeciesLabel,
+  createRNG,
 } from './types';
 import type { WorkerMessage, WorldConfig } from './types';
 
@@ -43,6 +46,14 @@ class ALifeApp {
   private readonly HISTORY_SAMPLE_INTERVAL = 3; // 每 3 帧采样一次
   private chartDirty = false;
 
+  // ---- 3D 模型预览 ----
+  private previewRenderer: THREE.WebGLRenderer | null = null;
+  private previewScene: THREE.Scene | null = null;
+  private previewCamera: THREE.PerspectiveCamera | null = null;
+  private previewMesh: THREE.Mesh | null = null;
+  private previewVisible = false;
+  private lastPreviewOrgId: number = -1; // 追踪当前预览的生命体ID，避免重复创建
+
   constructor() {
     // 初始化渲染器（3D 场景在启动画面时就作为背景渲染）
     const container = document.getElementById('canvas-container')!;
@@ -55,6 +66,8 @@ class ALifeApp {
     this.setupPanelToggle();
     this.setupChartPanel();
     this.setupControls();
+    this.setupDnaToggle();
+    this.setupPreviewRenderer();
 
     // 启动渲染循环（仅渲染 3D 场景，模拟尚未开始）
     this.renderLoop();
@@ -108,11 +121,16 @@ class ALifeApp {
   /** 用当前配置填充设置表单 */
   private populateSettingsForm(): void {
     const cfg = this.config;
+    this.setInputValue('cfg-seed', cfg.seed);
     this.setInputValue('cfg-initialMicrobes', cfg.initialMicrobes);
     this.setInputValue('cfg-initialPlants', cfg.initialPlants);
     this.setInputValue('cfg-initialInsects', cfg.initialInsects);
     this.setInputValue('cfg-initialAnimals', cfg.initialAnimals);
     this.setInputValue('cfg-worldSize', cfg.width);
+    this.setInputValue('cfg-terrainHeight', cfg.terrainHeight);
+    this.setInputValue('cfg-terrainRoughness', cfg.terrainRoughness);
+    this.setInputValue('cfg-waterLevel', cfg.waterLevel);
+    this.setInputValue('cfg-riverWidth', cfg.riverWidth);
     this.setInputValue('cfg-maxMicrobes', cfg.maxMicrobes);
     this.setInputValue('cfg-maxPlants', cfg.maxPlants);
     this.setInputValue('cfg-microbeGrowthRate', cfg.microbeGrowthRate);
@@ -123,19 +141,24 @@ class ALifeApp {
 
   /** 从设置表单读取值并应用到配置 */
   private applySettingsForm(): void {
-    this.config.initialMicrobes = this.getInputValue('cfg-initialMicrobes', 200);
-    this.config.initialPlants = this.getInputValue('cfg-initialPlants', 500);
-    this.config.initialInsects = this.getInputValue('cfg-initialInsects', 300);
-    this.config.initialAnimals = this.getInputValue('cfg-initialAnimals', 200);
+    this.config.seed = this.getInputValue('cfg-seed', -1);
+    this.config.initialMicrobes = this.getInputValue('cfg-initialMicrobes', 400);
+    this.config.initialPlants = this.getInputValue('cfg-initialPlants', 600);
+    this.config.initialInsects = this.getInputValue('cfg-initialInsects', 200);
+    this.config.initialAnimals = this.getInputValue('cfg-initialAnimals', 80);
     const worldSize = this.getInputValue('cfg-worldSize', 500);
     this.config.width = worldSize;
     this.config.height = worldSize;
-    this.config.maxMicrobes = this.getInputValue('cfg-maxMicrobes', 600);
-    this.config.maxPlants = this.getInputValue('cfg-maxPlants', 800);
-    this.config.microbeGrowthRate = this.getInputValue('cfg-microbeGrowthRate', 2);
-    this.config.plantGrowthRate = this.getInputValue('cfg-plantGrowthRate', 3);
+    this.config.terrainHeight = this.getInputValue('cfg-terrainHeight', 1.0);
+    this.config.terrainRoughness = this.getInputValue('cfg-terrainRoughness', 1.0);
+    this.config.waterLevel = this.getInputValue('cfg-waterLevel', 1.5);
+    this.config.riverWidth = this.getInputValue('cfg-riverWidth', 1.0);
+    this.config.maxMicrobes = this.getInputValue('cfg-maxMicrobes', 1500);
+    this.config.maxPlants = this.getInputValue('cfg-maxPlants', 1200);
+    this.config.microbeGrowthRate = this.getInputValue('cfg-microbeGrowthRate', 5);
+    this.config.plantGrowthRate = this.getInputValue('cfg-plantGrowthRate', 4);
     this.config.plantEnergy = this.getInputValue('cfg-plantEnergy', 30);
-    this.config.ticksPerSecond = this.getInputValue('cfg-ticksPerSecond', 30);
+    this.config.ticksPerSecond = this.getInputValue('cfg-ticksPerSecond', 10);
   }
 
   private setInputValue(id: string, value: number): void {
@@ -442,7 +465,13 @@ class ALifeApp {
     this.lastTpsTime = performance.now();
     this.isRunning = true;
 
-    // 重置渲染器和走势图
+    // 解析随机种子：-1 → 生成实际种子，≥0 → 使用指定种子
+    const [actualSeed] = createRNG(this.config.seed);
+    // 将实际种子写回配置（使 renderer 和 worker 使用同一种子）
+    const resolvedConfig: WorldConfig = { ...this.config, seed: actualSeed };
+
+    // 重置渲染器（使用地形参数和种子重建地形）和走势图
+    this.renderer.applyTerrainConfig(resolvedConfig);
     this.renderer.reset();
     this.resetPopulationHistory();
 
@@ -467,10 +496,10 @@ class ALifeApp {
     );
     this.setupWorkerMessages();
 
-    // 初始化模拟世界
+    // 初始化模拟世界（使用解析后的种子）
     this.worker.postMessage({
       type: WorkerMessageType.Init,
-      data: { config: this.config },
+      data: { config: resolvedConfig },
     } as WorkerMessage);
   }
 
@@ -523,6 +552,7 @@ class ALifeApp {
         case WorkerMessageType.Frame: {
           const frameData = data as RenderFrameData;
           this.renderer.updateOrganisms(frameData.organisms);
+          this.renderer.updateEggs(frameData.eggs ?? []);
           this.lastStats = frameData.stats;
 
           // 采样物种数量到历史记录
@@ -551,6 +581,7 @@ class ALifeApp {
     this.renderer.render();
     this.updateUI();
     this.drawChart();
+    this.renderPreview();
   };
 
   /** 更新 UI 数据显示 */
@@ -590,6 +621,30 @@ class ALifeApp {
       else if (co2 < 0.7) co2El.style.color = '#ffaa00';
       else if (co2 > 1.5) co2El.style.color = '#44aaff';
       else co2El.style.color = '#66ff66';
+    }
+
+    // 大气 O₂
+    const o2 = stats.o2Level;
+    const o2El = document.getElementById('stat-o2');
+    if (o2El) {
+      o2El.textContent = o2.toFixed(3);
+      // O₂ 颜色指示：正常蓝绿色，偏低橙色，极低红色，偏高亮蓝
+      if (o2 < 0.3) o2El.style.color = '#ff4444';
+      else if (o2 < 0.6) o2El.style.color = '#ffaa00';
+      else if (o2 > 1.5) o2El.style.color = '#88ddff';
+      else o2El.style.color = '#66ccff';
+    }
+
+    // 有害气体
+    const toxic = stats.toxicGasLevel;
+    const toxicEl = document.getElementById('stat-toxic');
+    if (toxicEl) {
+      toxicEl.textContent = toxic.toFixed(3);
+      // 有害气体颜色指示：无污染绿色，轻微黄色，中等橙色，严重红色
+      if (toxic < 0.1) toxicEl.style.color = '#66ff66';
+      else if (toxic < 0.3) toxicEl.style.color = '#ccff44';
+      else if (toxic < 0.6) toxicEl.style.color = '#ffaa00';
+      else toxicEl.style.color = '#ff4444';
     }
 
     this.setStatText('stat-fps', this.renderer.currentFps.toString());
@@ -635,6 +690,10 @@ class ALifeApp {
     { name: '食性', color: '#8d6e63' },
     { name: '突变率', color: '#78909c' },
     { name: '夜行性', color: '#5c6bc0' },
+    { name: '水生性', color: '#00acc1' },
+    { name: '体型形态', color: '#7cb342' },
+    { name: '体色色相', color: '#e91e63' },
+    { name: '体色明度', color: '#fdd835' },
   ];
 
   /** 类型名称映射 */
@@ -645,6 +704,97 @@ class ALifeApp {
       case OrganismType.Insect: return '🦗 昆虫';
       case OrganismType.Animal: return '🐾 动物';
     }
+  }
+
+  // ================================================================
+  //  DNA 折叠 & 3D 预览
+  // ================================================================
+
+  /** 设置 DNA 基因组区域折叠/展开 */
+  private setupDnaToggle(): void {
+    const toggle = document.getElementById('dna-section-toggle');
+    const section = document.getElementById('dna-section');
+    if (toggle && section) {
+      toggle.addEventListener('click', () => {
+        section.classList.toggle('collapsed');
+      });
+    }
+  }
+
+  /** 初始化 3D 模型预览迷你渲染器 */
+  private setupPreviewRenderer(): void {
+    const canvas = document.getElementById('org-preview-canvas') as HTMLCanvasElement;
+    if (!canvas) return;
+
+    this.previewRenderer = new THREE.WebGLRenderer({
+      canvas,
+      alpha: true,
+      antialias: true,
+    });
+    this.previewRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.previewRenderer.setClearColor(0x000000, 0);
+    this.previewRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.previewRenderer.toneMappingExposure = 1.2;
+
+    this.previewScene = new THREE.Scene();
+
+    // 灯光
+    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+    this.previewScene.add(ambient);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+    dirLight.position.set(2, 3, 2);
+    this.previewScene.add(dirLight);
+    const fillLight = new THREE.DirectionalLight(0x88bbff, 0.4);
+    fillLight.position.set(-2, 1, -1);
+    this.previewScene.add(fillLight);
+
+    this.previewCamera = new THREE.PerspectiveCamera(35, canvas.width / canvas.height, 0.1, 50);
+    this.previewCamera.position.set(0, 0.5, 2.2);
+    this.previewCamera.lookAt(0, 0.3, 0);
+  }
+
+  /** 更新 3D 预览模型 */
+  private updatePreviewModel(org: OrganismRenderData): void {
+    if (!this.previewScene || !this.previewRenderer || !this.previewCamera) return;
+
+    // 移除旧模型
+    if (this.previewMesh) {
+      this.previewScene.remove(this.previewMesh);
+      this.previewMesh.geometry.dispose();
+      (this.previewMesh.material as THREE.Material).dispose();
+      this.previewMesh = null;
+    }
+
+    // 通过主渲染器创建预览模型
+    this.previewMesh = this.renderer.createPreviewMesh(org.type, org.dna);
+
+    // 根据物种类型调整预览大小和位置
+    let previewScale = 1.0;
+    let yOffset = 0.3;
+    switch (org.type) {
+      case OrganismType.Microbe: previewScale = 2.5; yOffset = 0.15; break;
+      case OrganismType.Plant:   previewScale = 1.2; yOffset = 0;    break;
+      case OrganismType.Insect:  previewScale = 2.0; yOffset = 0.1;  break;
+      case OrganismType.Animal:  previewScale = 1.5; yOffset = 0;    break;
+    }
+    this.previewMesh.scale.multiplyScalar(previewScale);
+    this.previewMesh.position.y = yOffset;
+
+    this.previewScene.add(this.previewMesh);
+    this.previewVisible = true;
+    this.lastPreviewOrgId = org.id;
+  }
+
+  /** 渲染 3D 预览（在主渲染循环中调用） */
+  private renderPreview(): void {
+    if (!this.previewVisible || !this.previewRenderer || !this.previewScene || !this.previewCamera) return;
+
+    // 缓慢旋转展示
+    if (this.previewMesh) {
+      this.previewMesh.rotation.y += 0.012;
+    }
+
+    this.previewRenderer.render(this.previewScene, this.previewCamera);
   }
 
   /** 显示生命体详情面板 */
@@ -677,6 +827,80 @@ class ALifeApp {
     this.setStatText('org-size', org.size.toFixed(2));
     this.setStatText('org-position', `(${org.x.toFixed(0)}, ${org.z.toFixed(0)})`);
 
+    // ---- 性别、饱腹度、繁殖状态 ----
+    const genderRow = document.getElementById('org-gender-row')!;
+    const satietyRow = document.getElementById('org-satiety-row')!;
+    const estrusRow = document.getElementById('org-estrus-row')!;
+
+    if (org.isCorpse) {
+      // 尸体特殊显示
+      genderRow.style.display = 'none';
+      satietyRow.style.display = 'none';
+      estrusRow.style.display = 'none';
+      const titleEl2 = document.getElementById('org-title')!;
+      titleEl2.textContent = `💀 ${roleLabel} (尸体)`;
+      this.setStatText('org-health', `腐烂 ${(org.decayProgress * 100).toFixed(0)}%`);
+    } else if (org.gender === Gender.None) {
+      // 微生物/植物无性别
+      genderRow.style.display = 'none';
+      satietyRow.style.display = org.type === OrganismType.Plant ? 'none' : 'flex';
+      estrusRow.style.display = 'none';
+      if (org.type !== OrganismType.Plant) {
+        const satPct = (org.satiety * 100).toFixed(0);
+        this.setStatText('org-satiety', `${satPct}%`);
+      }
+    } else {
+      genderRow.style.display = 'flex';
+      satietyRow.style.display = 'flex';
+      estrusRow.style.display = 'flex';
+
+      // 性别
+      const genderEl = document.getElementById('org-gender')!;
+      if (org.gender === Gender.Female) {
+        genderEl.textContent = '♀ 雌性';
+        genderEl.style.color = '#ff99cc';
+      } else {
+        genderEl.textContent = '♂ 雄性';
+        genderEl.style.color = '#66bbff';
+      }
+
+      // 饱腹度
+      const satPct = (org.satiety * 100).toFixed(0);
+      const satEl = document.getElementById('org-satiety')!;
+      satEl.textContent = `${satPct}%`;
+      if (org.satiety > 0.7) satEl.style.color = '#66ff66';
+      else if (org.satiety > 0.3) satEl.style.color = '#ffaa00';
+      else satEl.style.color = '#ff4444';
+
+      // 繁殖状态（区分怀孕/发情/产卵/信号释放）
+      const reproEl = document.getElementById('org-repro-status')!;
+      if (org.gender === Gender.Female) {
+        if (org.isPregnant) {
+          const progPct = (org.pregnancyProgress * 100).toFixed(0);
+          if (org.type === OrganismType.Animal) {
+            reproEl.textContent = `🤰 怀孕中 ${progPct}%`;
+          } else {
+            reproEl.textContent = `🥚 孕卵中 ${progPct}%`;
+          }
+          reproEl.style.color = '#ffaa66';
+        } else if (org.isInEstrus) {
+          reproEl.textContent = '🔥 发情中（释放信息素）';
+          reproEl.style.color = '#ff6699';
+        } else {
+          reproEl.textContent = '⏳ 非发情期';
+          reproEl.style.color = '#888888';
+        }
+      } else {
+        if (org.isEmittingMatingSignal) {
+          reproEl.textContent = '📢 求偶信号释放中';
+          reproEl.style.color = '#66ccff';
+        } else {
+          reproEl.textContent = '♂ 待交配';
+          reproEl.style.color = '#88aacc';
+        }
+      }
+    }
+
     // DNA 条形图
     const dnaBarsEl = document.getElementById('org-dna-bars')!;
     let dnaHtml = '';
@@ -697,12 +921,19 @@ class ALifeApp {
       `;
     }
     dnaBarsEl.innerHTML = dnaHtml;
+
+    // 仅当选中的生命体变化时才重建 3D 预览模型（避免旋转被重置）
+    if (org.id !== this.lastPreviewOrgId) {
+      this.updatePreviewModel(org);
+    }
   }
 
   /** 隐藏生命体详情面板 */
   private hideOrganismPanel(): void {
     const panel = document.getElementById('organism-panel')!;
     panel.classList.remove('visible');
+    this.previewVisible = false;
+    this.lastPreviewOrgId = -1;
   }
 }
 
