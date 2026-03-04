@@ -147,7 +147,7 @@ WebWorker 模拟线程
 
 ```bash
 # 克隆项目
-git clone https://github.com/your-username/ALife.git
+git clone https://github.com/DannyLee1991/ALife.git
 cd ALife
 
 # 安装依赖
@@ -392,7 +392,7 @@ WebWorker Simulation Thread
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/ALife.git
+git clone https://github.com/DannyLee1991/ALife.git
 cd ALife
 
 # Install dependencies

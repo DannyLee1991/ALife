@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>ALife - 人工生命演化模拟器</title>
   <style>
     * {
@@ -27,6 +27,7 @@
 
     canvas {
       display: block;
+      touch-action: none; /* 阻止浏览器默认手势，交由 JS 处理 */
     }
 
     #ui-overlay {
@@ -86,7 +87,7 @@
       right: 16px;
       background: rgba(0, 0, 0, 0.75);
       color: #e0e0e0;
-      padding: 16px 20px;
+      padding: 10px 10px;
       border-radius: 12px;
       font-size: 13px;
       backdrop-filter: blur(10px);
@@ -94,16 +95,23 @@
       pointer-events: auto;
     }
 
+    #controls-panel > div {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      align-items: stretch;
+    }
+
     #controls-panel button {
       background: rgba(79, 195, 247, 0.2);
       color: #4fc3f7;
       border: 1px solid rgba(79, 195, 247, 0.4);
-      padding: 6px 16px;
+      padding: 6px 14px;
       border-radius: 6px;
       cursor: pointer;
       font-size: 13px;
-      margin: 4px;
       transition: all 0.2s;
+      white-space: nowrap;
     }
 
     #controls-panel button:hover {
@@ -161,6 +169,21 @@
     #organism-panel.visible {
       display: block;
       animation: panelFadeIn 0.25s ease-out;
+    }
+
+    /* 面板滚动条美化 */
+    #organism-panel::-webkit-scrollbar,
+    #stats-panel::-webkit-scrollbar {
+      width: 3px;
+    }
+    #organism-panel::-webkit-scrollbar-thumb,
+    #stats-panel::-webkit-scrollbar-thumb {
+      background: rgba(79,195,247,0.25);
+      border-radius: 2px;
+    }
+    #organism-panel::-webkit-scrollbar-track,
+    #stats-panel::-webkit-scrollbar-track {
+      background: transparent;
     }
 
     @keyframes panelFadeIn {
@@ -421,6 +444,25 @@
       color: #fff;
     }
 
+    .github-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 24px;
+      color: #607d8b;
+      text-decoration: none;
+      font-size: 14px;
+      transition: color 0.2s;
+    }
+
+    .github-link:hover {
+      color: #e0e0e0;
+    }
+
+    .github-icon {
+      vertical-align: middle;
+    }
+
     /* ---- 设置弹窗 ---- */
     #settings-modal {
       position: absolute;
@@ -644,6 +686,319 @@
       bottom: 16px;
     }
 
+    /* ============================================================
+       移动端适配
+       ============================================================ */
+
+    /* ---------- 平板 & 小屏 (<= 768px) ---------- */
+    @media (max-width: 768px) {
+
+      /* ---- 启动画面 ---- */
+      .start-logo { font-size: 56px; }
+      .start-title {
+        font-size: 36px;
+        letter-spacing: 4px;
+      }
+      .start-subtitle { font-size: 15px; }
+      .start-desc {
+        font-size: 13px;
+        max-width: 320px;
+        margin-bottom: 28px;
+      }
+      .start-btn {
+        padding: 12px 28px;
+        font-size: 15px;
+      }
+
+      /* ---- 统计面板 ---- */
+      #stats-panel {
+        top: 10px;
+        left: 10px;
+        padding: 12px 14px;
+        min-width: 180px;
+        font-size: 12px;
+        border-radius: 10px;
+        max-height: calc(100vh - 80px);
+        overflow-y: auto;
+      }
+      #stats-panel h3 {
+        font-size: 13px;
+        margin-bottom: 6px;
+      }
+      .species-list { max-height: 140px; }
+
+      /* ---- 控制面板 ---- */
+      #controls-panel {
+        top: 10px;
+        right: 10px;
+        padding: 8px 8px;
+        border-radius: 10px;
+      }
+      #controls-panel button {
+        padding: 7px 10px;
+        font-size: 12px;
+        min-height: 34px;
+      }
+
+      /* ---- 生命体详情面板 ---- */
+      #organism-panel {
+        right: 10px;
+        bottom: 10px;
+        min-width: 230px;
+        max-width: 280px;
+        padding: 14px 16px;
+        max-height: calc(100vh - 60px);
+        border-radius: 10px;
+      }
+
+      /* ---- 走势图 ---- */
+      #chart-canvas { height: 110px; }
+      .chart-header { padding: 6px 12px; }
+
+      /* ---- 设置弹窗 ---- */
+      .settings-card {
+        padding: 20px 22px;
+        width: 95vw;
+        max-height: 85vh;
+      }
+      .setting-row label { font-size: 12px; }
+      .setting-row input[type="number"] {
+        width: 80px;
+        font-size: 12px;
+        padding: 6px 8px;
+      }
+    }
+
+    /* ---------- 手机竖屏 (<= 480px) ---------- */
+    @media (max-width: 480px) {
+
+      /* ---- 启动画面 ---- */
+      .start-logo { font-size: 44px; }
+      .start-title {
+        font-size: 28px;
+        letter-spacing: 3px;
+      }
+      .start-subtitle {
+        font-size: 13px;
+        margin-bottom: 8px;
+      }
+      .start-desc {
+        font-size: 12px;
+        max-width: 260px;
+        margin-bottom: 24px;
+        line-height: 1.5;
+      }
+      .start-buttons {
+        flex-direction: column;
+        gap: 12px;
+        align-items: center;
+      }
+      .start-btn {
+        padding: 14px 40px;
+        font-size: 15px;
+        width: 200px;
+      }
+
+      /* ---- 统计面板 ---- */
+      #stats-panel {
+        top: 8px;
+        left: 8px;
+        padding: 10px 12px;
+        min-width: 160px;
+        font-size: 11px;
+        line-height: 1.6;
+        max-height: calc(100vh - 60px);
+      }
+      #stats-panel h3 { font-size: 12px; }
+      .species-list { max-height: 100px; }
+
+      /* ---- 控制面板 ---- */
+      #controls-panel {
+        top: 8px;
+        right: 8px;
+        padding: 6px 6px;
+        border-radius: 10px;
+      }
+      #controls-panel button {
+        padding: 7px 10px;
+        font-size: 11px;
+        min-height: 32px;
+        border-radius: 8px;
+      }
+
+      /* ---- 生命体详情面板：全宽底部弹出 ---- */
+      #organism-panel {
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        min-width: unset;
+        max-width: unset;
+        width: auto;
+        padding: 12px 14px;
+        max-height: 50vh;
+        border-radius: 12px;
+        font-size: 12px;
+      }
+      #organism-panel .panel-header { margin-bottom: 6px; padding-bottom: 6px; }
+      #organism-panel .panel-header h4 { font-size: 13px; }
+      #organism-panel .info-label,
+      #organism-panel .info-value { font-size: 11px; }
+      #organism-panel .model-preview canvas { height: 100px; }
+      #organism-panel .dna-bar-label { width: 55px; font-size: 10px; }
+      #organism-panel .dna-bar-value { width: 35px; font-size: 10px; }
+
+      /* ---- 走势图 ---- */
+      #chart-canvas { height: 90px; }
+      #chart-panel.collapsed { transform: translateY(calc(100% - 30px)); }
+      .chart-header {
+        padding: 5px 10px;
+      }
+      .chart-header h4 { font-size: 12px; }
+      #chart-body { padding: 6px 8px 8px; }
+
+      /* ---- 设置弹窗 ---- */
+      .settings-card {
+        padding: 16px 16px;
+        width: 96vw;
+        max-height: 88vh;
+        border-radius: 12px;
+      }
+      .settings-card h2 {
+        font-size: 16px;
+        margin-bottom: 14px;
+      }
+      .settings-section h3 {
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+      .setting-row {
+        padding: 6px 0;
+      }
+      .setting-row label {
+        font-size: 12px;
+        flex: 1;
+        min-width: 0;
+      }
+      .setting-row input[type="number"] {
+        width: 76px;
+        padding: 8px 8px;
+        font-size: 14px;
+        border-radius: 8px;
+        /* 更大的输入框适合手指操作 */
+      }
+      .settings-footer {
+        margin-top: 14px;
+        padding-top: 12px;
+      }
+      .settings-footer button {
+        padding: 10px 20px;
+        font-size: 14px;
+        border-radius: 10px;
+        min-height: 42px;
+      }
+    }
+
+    /* ---------- 超小屏幕 (<= 360px) ---------- */
+    @media (max-width: 360px) {
+      .start-title { font-size: 24px; letter-spacing: 2px; }
+      .start-logo { font-size: 36px; }
+      .start-desc { font-size: 11px; max-width: 230px; }
+
+      #stats-panel {
+        padding: 8px 10px;
+        min-width: 140px;
+        font-size: 10px;
+      }
+      #stats-panel h3 { font-size: 11px; }
+
+      #controls-panel button {
+        padding: 6px 8px;
+        font-size: 10px;
+        min-height: 30px;
+      }
+
+      #organism-panel {
+        font-size: 11px;
+        max-height: 45vh;
+      }
+    }
+
+    /* ---------- 横屏手机适配 ---------- */
+    @media (max-height: 500px) and (orientation: landscape) {
+      /* 启动画面紧凑布局 */
+      .start-logo { font-size: 36px; margin-bottom: 4px; }
+      .start-title { font-size: 24px; margin-bottom: 4px; }
+      .start-subtitle { font-size: 12px; margin-bottom: 4px; }
+      .start-desc { font-size: 11px; margin-bottom: 16px; }
+      .start-btn { padding: 10px 28px; font-size: 14px; }
+
+      /* 面板更紧凑 */
+      #stats-panel {
+        max-height: calc(100vh - 20px);
+        font-size: 11px;
+        line-height: 1.5;
+        padding: 8px 10px;
+      }
+      #stats-panel h3 { font-size: 11px; margin-bottom: 4px; }
+      .species-list { max-height: 80px; }
+
+      /* 详情面板 */
+      #organism-panel {
+        max-height: calc(100vh - 20px);
+        max-width: 260px;
+      }
+
+      /* 走势图 */
+      #chart-canvas { height: 70px; }
+    }
+
+    /* ---------- 触控通用优化 ---------- */
+    @media (pointer: coarse) {
+      /* 触控设备上增大可点击区域 */
+      #controls-panel button {
+        min-height: 40px;
+        min-width: 44px;
+      }
+      .start-btn {
+        min-height: 48px;
+      }
+      #organism-panel .panel-close {
+        padding: 6px 10px;
+        font-size: 18px;
+      }
+      #stats-panel .panel-toggle {
+        padding: 4px 8px;
+        font-size: 16px;
+      }
+      .chart-header {
+        min-height: 40px;
+      }
+      #organism-panel .dna-section-header {
+        padding: 6px 0;
+      }
+      .settings-footer button {
+        min-height: 44px;
+      }
+    }
+
+    /* ---- 安全区域适配（iPhone 刘海屏等） ---- */
+    @supports (padding: env(safe-area-inset-bottom)) {
+      #chart-panel {
+        padding-bottom: env(safe-area-inset-bottom);
+      }
+      #organism-panel {
+        bottom: calc(16px + env(safe-area-inset-bottom));
+      }
+      #stats-panel {
+        top: calc(16px + env(safe-area-inset-top));
+        left: calc(16px + env(safe-area-inset-left));
+      }
+      #controls-panel {
+        top: calc(16px + env(safe-area-inset-top));
+        right: calc(16px + env(safe-area-inset-right));
+      }
+    }
+
   </style>
 </head>
 <body>
@@ -845,6 +1200,10 @@
           <button class="start-btn primary" id="btn-start-sim">🚀 开始模拟</button>
           <button class="start-btn secondary" id="btn-open-settings">⚙ 设置</button>
         </div>
+        <a class="github-link" href="https://github.com/DannyLee1991/ALife" target="_blank" rel="noopener noreferrer">
+          <svg class="github-icon" viewBox="0 0 16 16" width="18" height="18" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+          GitHub
+        </a>
       </div>
     </div>
 

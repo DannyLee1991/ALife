@@ -1771,21 +1771,32 @@ export class Renderer {
     }, { passive: false });
 
     // ---- 触摸事件 ----
+    // 触控点击检测（tap-to-select）
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchStartTime = 0;
+    let touchMoved = false;
+
     canvas.addEventListener('touchstart', (e) => {
       e.preventDefault();
       this.activeTouches = Array.from(e.touches);
 
       if (e.touches.length === 1) {
-        // 单指 → 旋转
+        // 单指 → 旋转 + 记录起始位置用于 tap 检测
         this.isDragging = true;
         this.isPanning = false;
         this.lastMouseX = e.touches[0].clientX;
         this.lastMouseY = e.touches[0].clientY;
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        touchStartTime = performance.now();
+        touchMoved = false;
       } else if (e.touches.length === 2) {
         // 双指 → 缩放
         this.isDragging = false;
         this.isPanning = false;
         this.lastTouchDist = this.getTouchDist(e.touches[0], e.touches[1]);
+        touchMoved = true; // 多指操作不算 tap
       } else if (e.touches.length >= 3) {
         // 三指 → 平移
         this.isDragging = false;
@@ -1793,6 +1804,7 @@ export class Renderer {
         const center = this.getTouchCenter(e.touches);
         this.lastTouchCenter.x = center.x;
         this.lastTouchCenter.y = center.y;
+        touchMoved = true;
       }
     }, { passive: false });
 
@@ -1806,6 +1818,13 @@ export class Renderer {
         const dy = e.touches[0].clientY - this.lastMouseY;
         this.lastMouseX = e.touches[0].clientX;
         this.lastMouseY = e.touches[0].clientY;
+
+        // 检测是否产生了明显的移动（超过 8px 即视为拖拽，非 tap）
+        const totalDx = e.touches[0].clientX - touchStartX;
+        const totalDy = e.touches[0].clientY - touchStartY;
+        if (totalDx * totalDx + totalDy * totalDy > 64) {
+          touchMoved = true;
+        }
 
         this.cameraAzimuth -= dx * 0.005;
         this.cameraAngle = Math.max(0.05, Math.min(Math.PI / 2 - 0.01,
@@ -1833,27 +1852,41 @@ export class Renderer {
     }, { passive: false });
 
     canvas.addEventListener('touchend', (e) => {
+      // 检测单指 tap（短时间 + 无大幅移动 + 单指释放）
+      const touchCount = e.touches.length;
+      const elapsed = performance.now() - touchStartTime;
+      if (touchCount === 0 && !touchMoved && elapsed < 300) {
+        // 这是一个 tap，触发点选
+        this.handleClick(touchStartX, touchStartY);
+      }
+
       this.activeTouches = Array.from(e.touches);
-      if (e.touches.length === 0) {
+      if (touchCount === 0) {
         this.isDragging = false;
         this.isPanning = false;
-      } else if (e.touches.length === 1) {
+      } else if (touchCount === 1) {
         this.isDragging = true;
         this.isPanning = false;
         this.lastMouseX = e.touches[0].clientX;
         this.lastMouseY = e.touches[0].clientY;
-      } else if (e.touches.length === 2) {
+      } else if (touchCount === 2) {
         this.isDragging = false;
         this.isPanning = false;
         this.lastTouchDist = this.getTouchDist(e.touches[0], e.touches[1]);
       }
     });
 
-    // ---- 窗口大小变化 ----
-    window.addEventListener('resize', () => {
+    // ---- 窗口大小变化（含移动端旋转屏幕） ----
+    const handleResize = () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    };
+    window.addEventListener('resize', handleResize);
+    // 部分移动端浏览器不触发 resize，需要监听 orientationchange
+    window.addEventListener('orientationchange', () => {
+      setTimeout(handleResize, 150); // 延迟等待浏览器完成旋转
     });
   }
 
